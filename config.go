@@ -70,6 +70,11 @@ type MediaConfig struct {
 	DefaultTimeout time.Duration `yaml:"default_timeout"`
 	// MaxTimeout caps ?timeout_ms.
 	MaxTimeout time.Duration `yaml:"max_timeout"`
+	// MaxConcurrentThumbnails bounds how many thumbnails are generated at
+	// once. Generation is CPU-bound and holds the decoded image in memory, so
+	// an unbounded burst of distinct sizes could exhaust both. Defaults to the
+	// number of usable CPUs.
+	MaxConcurrentThumbnails int `yaml:"max_concurrent_thumbnails"`
 	// EnableAuthenticatedMedia mirrors Synapse's enable_authenticated_media.
 	// When true, media rows with authenticated = true are hidden from the
 	// legacy unauthenticated /_matrix/media endpoints.
@@ -110,14 +115,58 @@ type UpstreamConfig struct {
 	Thumbnail UpstreamTarget `yaml:"thumbnail"`
 }
 
+// UpstreamTarget names one or more Synapse workers to fall back to. Several
+// may be given, in which case requests are spread across them by least
+// connections, the same way nginx would.
 type UpstreamTarget struct {
-	// Socket is a unix socket path to the Synapse worker.
+	// Socket is a unix socket path to a Synapse worker.
 	Socket string `yaml:"socket"`
-	// URL is used when Socket is empty.
+	// Sockets lists several unix sockets to balance across.
+	Sockets []string `yaml:"sockets"`
+	// URL is a TCP endpoint, used when no socket is given.
 	URL string `yaml:"url"`
+	// URLs lists several TCP endpoints to balance across.
+	URLs []string `yaml:"urls"`
 }
 
-func (t UpstreamTarget) configured() bool { return t.Socket != "" || t.URL != "" }
+// Endpoints returns every configured target, singular and plural forms
+// combined, in configuration order.
+func (t UpstreamTarget) Endpoints() []UpstreamEndpoint {
+	var out []UpstreamEndpoint
+	if t.Socket != "" {
+		out = append(out, UpstreamEndpoint{Socket: t.Socket})
+	}
+	for _, s := range t.Sockets {
+		if s != "" {
+			out = append(out, UpstreamEndpoint{Socket: s})
+		}
+	}
+	if t.URL != "" {
+		out = append(out, UpstreamEndpoint{URL: t.URL})
+	}
+	for _, u := range t.URLs {
+		if u != "" {
+			out = append(out, UpstreamEndpoint{URL: u})
+		}
+	}
+	return out
+}
+
+// UpstreamEndpoint is a single Synapse worker to proxy to.
+type UpstreamEndpoint struct {
+	Socket string
+	URL    string
+}
+
+// Name identifies the endpoint in logs and metrics.
+func (e UpstreamEndpoint) Name() string {
+	if e.Socket != "" {
+		return "unix:" + e.Socket
+	}
+	return e.URL
+}
+
+func (t UpstreamTarget) configured() bool { return len(t.Endpoints()) > 0 }
 
 type LogConfig struct {
 	// Level is one of trace, debug, info, warn, error.

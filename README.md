@@ -88,6 +88,43 @@ Everything else is byte-for-byte identical, verified by the parity harness.
   which has no good pure-Go encoder, so those requests are proxied. On a real
   server they are well under 1% of stored thumbnails.
 
+## Concurrency
+
+Every request runs in its own goroutine, so the worker serves as many at once
+as the machine allows — that is the point of it, and the reason one process
+replaces several single-threaded Python ones. Three things are deliberately
+bounded:
+
+| Bound | Setting | Why |
+|---|---|---|
+| Database connections | `database.max_conns` (16) | Queries are short and indexed; this is rarely the limit |
+| Thumbnail generation | `media.max_concurrent_thumbnails` (CPU count) | CPU-bound, and holds the decoded bitmap in memory — hundreds of MB per image at a 100M pixel limit |
+| Proxied requests | none | Bounded by the upstream Synapse workers, not here |
+
+Concurrent requests for the *same* thumbnail are collapsed with `singleflight`,
+so a viral image is decoded once no matter how many clients ask at once.
+
+Serving an existing file is not bounded at all: it is a database lookup and a
+`sendfile`, and the kernel does the copying.
+
+### Upstreams
+
+List every Synapse media worker under `upstream.download.sockets` and
+`upstream.thumbnail.sockets`. Requests are spread by **least connections**
+rather than round robin, because these responses vary enormously in cost — a
+cached thumbnail returns at once while an uncached remote download blocks on a
+federated fetch from another server, and round robin would keep handing work to
+a worker already stuck on a slow transfer.
+
+If an upstream cannot be reached, the request is retried against another. That
+is safe only because nothing has been written to the client yet and a GET has
+no body to replay; a real response, including a 5xx, is passed straight
+through rather than retried.
+
+`synapse_media_worker_upstream_inflight` and
+`synapse_media_worker_upstream_requests_total` are labelled per upstream, so an
+unbalanced pool or one sick worker shows up directly instead of as latency.
+
 ## Configuration
 
 Copy `config.sample.yaml` and edit it. Values must agree with `homeserver.yaml`;

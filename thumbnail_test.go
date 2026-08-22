@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"image"
+	"runtime"
 	"testing"
+	"time"
 )
 
 // Golden values taken from a real Synapse media store: a 899x1599 JPEG whose
@@ -120,7 +124,7 @@ func TestFindExactRequiresAllFourFields(t *testing.T) {
 }
 
 func TestCanGenerate(t *testing.T) {
-	th := NewThumbnailer(100_000_000)
+	th := NewThumbnailer(100_000_000, 4)
 	png := ThumbnailRequest{Width: 96, Height: 96, Method: "crop", Type: typePNG}
 	for _, src := range []string{"image/jpeg", "image/png", "image/gif", "image/webp"} {
 		if !th.CanGenerate(src, png) {
@@ -136,5 +140,60 @@ func TestCanGenerate(t *testing.T) {
 	animated := ThumbnailRequest{Width: 96, Height: 96, Method: "crop", Type: typeWebP, Animated: true}
 	if th.CanGenerate("image/gif", animated) {
 		t.Error("should refuse animated webp")
+	}
+}
+
+// Generation is CPU-bound and holds the decoded bitmap in memory, so it must
+// not run unbounded: a burst of distinct sizes would otherwise decode all at
+// once. This checks the limit is actually enforced.
+func TestGenerationConcurrencyIsBounded(t *testing.T) {
+	th := NewThumbnailer(100_000_000, 2)
+
+	if err := th.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := th.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The third must block until a slot frees.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := th.acquire(ctx); err == nil {
+		t.Fatal("acquired a third slot with a limit of two")
+	}
+
+	th.release()
+	if err := th.acquire(context.Background()); err != nil {
+		t.Errorf("could not acquire after a release: %v", err)
+	}
+}
+
+// A client that goes away must not hold a generation slot.
+func TestGenerationSlotReleasedOnCancelledRequest(t *testing.T) {
+	th := NewThumbnailer(100_000_000, 1)
+	if err := th.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- th.acquire(ctx) }()
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("got %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("acquire did not give up when the caller went away")
+	}
+}
+
+func TestConcurrencyDefaultsToCPUCount(t *testing.T) {
+	th := NewThumbnailer(100_000_000, 0)
+	if cap(th.slots) != runtime.GOMAXPROCS(0) {
+		t.Errorf("default limit = %d, want GOMAXPROCS %d", cap(th.slots), runtime.GOMAXPROCS(0))
 	}
 }

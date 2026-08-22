@@ -49,6 +49,18 @@ var (
 		Help: "Access token validations by outcome.",
 	}, []string{"outcome"})
 
+	// Per-upstream counters, so an unbalanced pool or one sick worker is
+	// visible rather than showing up only as latency.
+	upstreamInflight = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "synapse_media_worker_upstream_inflight",
+		Help: "Proxied requests currently in flight, by upstream.",
+	}, []string{"upstream"})
+
+	upstreamRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "synapse_media_worker_upstream_requests_total",
+		Help: "Proxied requests dispatched, by upstream and result.",
+	}, []string{"upstream", "result"})
+
 	tokenCacheSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "synapse_media_worker_token_cache_entries",
 		Help: "Access token verdicts currently cached.",

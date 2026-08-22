@@ -99,7 +99,7 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		db:          db,
 		paths:       NewMediaPaths(cfg.Media.StorePath),
 		cache:       cache,
-		thumbnailer: NewThumbnailer(cfg.Media.MaxImagePixels),
+		thumbnailer: NewThumbnailer(cfg.Media.MaxImagePixels, cfg.Media.MaxConcurrentThumbnails),
 		auth:        auth,
 		log:         log,
 	}

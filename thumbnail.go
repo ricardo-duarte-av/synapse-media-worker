@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -9,6 +10,7 @@ import (
 	"image/png"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -132,11 +134,35 @@ func cropBox(srcW, srcH, w, h int) (scaledW, scaledH int, box image.Rectangle) {
 // It only ever reads from that store.
 type Thumbnailer struct {
 	maxImagePixels int64
+	// slots bounds concurrent generation. Decoding holds the full bitmap in
+	// memory -- at the default 100M pixel limit that is hundreds of megabytes
+	// for a single image -- and resizing is CPU-bound, so letting every
+	// request generate at once would trade a slow response for an OOM.
+	slots chan struct{}
 }
 
-func NewThumbnailer(maxImagePixels int64) *Thumbnailer {
-	return &Thumbnailer{maxImagePixels: maxImagePixels}
+func NewThumbnailer(maxImagePixels int64, maxConcurrent int) *Thumbnailer {
+	if maxConcurrent <= 0 {
+		maxConcurrent = runtime.GOMAXPROCS(0)
+	}
+	return &Thumbnailer{
+		maxImagePixels: maxImagePixels,
+		slots:          make(chan struct{}, maxConcurrent),
+	}
 }
+
+// acquire waits for a generation slot, giving up if the caller goes away so a
+// disconnected client does not hold one.
+func (t *Thumbnailer) acquire(ctx context.Context) error {
+	select {
+	case t.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (t *Thumbnailer) release() { <-t.slots }
 
 // decodableSourceTypes mirrors Synapse's PILLOW_FORMATS: the decoders that are
 // part of the trusted computing base. Anything else is refused rather than
@@ -162,10 +188,15 @@ func (t *Thumbnailer) CanGenerate(sourceType string, req ThumbnailRequest) bool 
 }
 
 // Generate produces the thumbnail bytes for req from the file at srcPath.
-func (t *Thumbnailer) Generate(srcPath string, sourceType string, req ThumbnailRequest) ([]byte, error) {
+func (t *Thumbnailer) Generate(ctx context.Context, srcPath string, sourceType string, req ThumbnailRequest) ([]byte, error) {
 	if !t.CanGenerate(sourceType, req) {
 		return nil, ErrCannotGenerate
 	}
+	if err := t.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer t.release()
+
 	raw, err := os.ReadFile(srcPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading source media: %w", err)

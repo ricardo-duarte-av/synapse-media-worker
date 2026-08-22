@@ -35,6 +35,11 @@ media:
   signing_key_path: /data/signing.key
   # Must match homeserver.yaml's max_image_pixels.
   max_image_pixels: 100000000
+  # How many thumbnails may be generated at once. Generation is CPU-bound and
+  # holds the decoded image in memory, so this bounds both. Defaults to the
+  # number of usable CPUs; raise it only if generation is queueing while the
+  # CPUs sit idle.
+  # max_concurrent_thumbnails: 4
   # How long to wait for an in-progress async upload before returning 504.
   default_timeout: 20s
   max_timeout: 60s
@@ -64,10 +69,18 @@ auth:
 upstream:
   # Where to send requests the worker will not answer itself: remote media that
   # Synapse has not cached yet, and thumbnails it cannot generate.
+  #
+  # List every media worker you have. Requests are spread by least connections,
+  # and an unreachable worker is skipped, so a single worker here is both a
+  # bottleneck and a single point of failure. `socket:` (singular) still works
+  # for one.
   download:
-    socket: /var/sockets/nginx/av-media-worker-1.sock
+    sockets:
+      - /var/sockets/nginx/av-media-worker-1.sock
+      - /var/sockets/nginx/av-media-worker-2.sock
   thumbnail:
-    socket: /var/sockets/nginx/av-media-worker-thumbnails.sock
+    sockets:
+      - /var/sockets/nginx/av-media-worker-thumbnails.sock
 
 log:
   level: info

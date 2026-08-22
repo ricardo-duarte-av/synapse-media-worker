@@ -387,7 +387,7 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 			return readAllFile(f)
 		}
 		start := time.Now()
-		out, err := s.thumbnailer.Generate(srcPath, sourceType, req)
+		out, err := s.thumbnailer.Generate(r.Context(), srcPath, sourceType, req)
 		if err != nil {
 			return nil, err
 		}
