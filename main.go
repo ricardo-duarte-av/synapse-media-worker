@@ -227,7 +227,29 @@ func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	return withLogging(s.log, mux)
+	return withLogging(s.log, withCORSPreflight(mux))
+}
+
+// withCORSPreflight answers CORS preflight requests before routing.
+//
+// Authenticated media requires an Authorization header, which makes every
+// media request from a cross-origin web client a preflighted one. Without this
+// a browser on any origin other than the homeserver's cannot load media at all.
+//
+// It runs as middleware rather than as a route because the federation handler
+// is registered for all methods on a path prefix, which a method-specific
+// pattern for the same prefix would conflict with. Answering before the
+// federation signature check is also correct: a preflight cannot carry an
+// X-Matrix signature, and Synapse answers it unauthenticated too.
+func withCORSPreflight(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			setCORSHeaders(w)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // withLogging records one line per request at debug level.
