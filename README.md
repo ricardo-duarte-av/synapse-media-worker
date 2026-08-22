@@ -16,6 +16,13 @@ the media store, and never implements an admin API. Anything it cannot answer is
 proxied back to Synapse, which keeps the worker small and every fallback
 correct.
 
+The one case where that costs something is remote media Synapse has not cached
+yet: the worker can only hand those to Synapse, so a federated fetch still runs
+in Python. Doing the fetch here instead would mean writing to the media store
+and inserting rows Synapse owns, which is a different and much less safe
+proposition than the read-only design this version rests on. It is the obvious
+next step, and not one to take casually.
+
 ## What it serves
 
 | Method | Path |

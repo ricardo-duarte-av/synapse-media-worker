@@ -62,6 +62,8 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
+            # A moving :0.1 that follows the latest 0.1.x patch release
+            type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
 
       - name: Build and push
