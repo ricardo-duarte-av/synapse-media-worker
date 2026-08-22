@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -69,6 +70,7 @@ func validLegacyVersion(v string) bool {
 
 // serveDownload handles both the authenticated and legacy download endpoints.
 func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request, serverName, mediaID string, allowAuthenticated bool) {
+	setMedia(r.Context(), serverName, mediaID)
 	if s.isMine(serverName) {
 		s.serveLocalDownload(w, r, mediaID, allowAuthenticated, false)
 		return
@@ -86,6 +88,7 @@ func (s *Server) serveLocalDownload(w http.ResponseWriter, r *http.Request, medi
 	path, err := s.localMediaPath(media)
 	if err != nil {
 		s.log.Warn().Err(err).Str("media_id", mediaID).Msg("Could not build media path")
+		setOutcome(r.Context(), outcomeNotFound)
 		respondNotFound(w, r.URL.Path)
 		return
 	}
@@ -95,12 +98,14 @@ func (s *Server) serveLocalDownload(w http.ResponseWriter, r *http.Request, medi
 		// providers configured here, so there is nowhere else to look.
 		s.log.Warn().Str("media_id", mediaID).Str("path", path).
 			Msg("Media row exists but file is missing")
+		setOutcome(r.Context(), outcomeNotFound)
 		respondNotFound(w, r.URL.Path)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
 	s.db.MarkRecentlyAccessedLocal(mediaID)
+	setOutcome(r.Context(), outcomeServed)
 
 	if federation {
 		// Synapse takes no filename from the request path here, but it does
@@ -114,6 +119,7 @@ func (s *Server) serveLocalDownload(w http.ResponseWriter, r *http.Request, medi
 	setCORPHeaders(w)
 	setDownloadSecurityHeaders(w)
 	if notModified(r) {
+		setOutcome(r.Context(), outcomeNotModified)
 		respondNotModified(w)
 		return
 	}
@@ -163,11 +169,13 @@ func (s *Server) serveRemoteDownload(w http.ResponseWriter, r *http.Request, ser
 	defer func() { _ = f.Close() }()
 
 	s.db.MarkRecentlyAccessedRemote(serverName, mediaID)
+	setOutcome(r.Context(), outcomeServed)
 
 	setCORSHeaders(w)
 	setCORPHeaders(w)
 	setDownloadSecurityHeaders(w)
 	if notModified(r) {
+		setOutcome(r.Context(), outcomeNotModified)
 		respondNotModified(w)
 		return
 	}
@@ -183,6 +191,7 @@ func (s *Server) serveRemoteDownload(w http.ResponseWriter, r *http.Request, ser
 // Federation downloads are for local media only; a media ID here is never
 // looked up against the remote cache.
 func (s *Server) handleFederationDownload(w http.ResponseWriter, r *http.Request) {
+	setMedia(r.Context(), s.cfg.ServerName, r.PathValue("mediaId"))
 	s.serveLocalDownload(w, r, r.PathValue("mediaId"), true, true)
 }
 
@@ -230,11 +239,16 @@ func (s *Server) handleFederationThumbnail(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) serveThumbnail(w http.ResponseWriter, r *http.Request, serverName, mediaID string, allowAuthenticated, federation bool) {
+	setMedia(r.Context(), serverName, mediaID)
 	req, err := ParseThumbnailRequest(r)
 	if err != nil {
 		writeMatrixError(w, http.StatusBadRequest, "M_INVALID_PARAM", err.Error())
 		return
 	}
+
+	annotate(r.Context(), func(rl *reqLog) {
+		rl.thumb = fmt.Sprintf("%dx%d/%s", req.Width, req.Height, req.Method)
+	})
 
 	if s.isMine(serverName) {
 		s.serveLocalThumbnail(w, r, mediaID, req, allowAuthenticated, federation)
@@ -267,7 +281,8 @@ func (s *Server) serveLocalThumbnail(w http.ResponseWriter, r *http.Request, med
 			if f, err := os.Open(path); err == nil {
 				defer func() { _ = f.Close() }()
 				s.db.MarkRecentlyAccessedLocal(mediaID)
-				thumbnailOutcome.WithLabelValues("synapse_store").Inc()
+				thumbnailOutcome.WithLabelValues(outcomeSynapseStore).Inc()
+				setOutcome(r.Context(), outcomeSynapseStore)
 				s.respondThumbnailFile(w, r, f, row.Type, federation)
 				return
 			}
@@ -326,7 +341,8 @@ func (s *Server) serveRemoteThumbnail(w http.ResponseWriter, r *http.Request, se
 			if f, err := os.Open(candidate.path); err == nil {
 				defer func() { _ = f.Close() }()
 				s.db.MarkRecentlyAccessedRemote(serverName, mediaID)
-				thumbnailOutcome.WithLabelValues("synapse_store").Inc()
+				thumbnailOutcome.WithLabelValues(outcomeSynapseStore).Inc()
+				setOutcome(r.Context(), outcomeSynapseStore)
 				s.respondThumbnailFile(w, r, f, row.Type, false)
 				return
 			}
@@ -349,7 +365,8 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 
 	if f, ok := s.cache.Open(key); ok {
 		defer func() { _ = f.Close() }()
-		thumbnailOutcome.WithLabelValues("worker_cache").Inc()
+		thumbnailOutcome.WithLabelValues(outcomeWorkerCache).Inc()
+		setOutcome(r.Context(), outcomeWorkerCache)
 		s.respondThumbnailFile(w, r, f, req.Type, federation)
 		return
 	}
@@ -397,7 +414,8 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	thumbnailOutcome.WithLabelValues("generated").Inc()
+	thumbnailOutcome.WithLabelValues(outcomeGenerated).Inc()
+	setOutcome(r.Context(), outcomeGenerated)
 	s.respondThumbnailBytes(w, r, data.([]byte), req.Type, federation)
 }
 
@@ -410,6 +428,7 @@ func (s *Server) respondThumbnailFile(w http.ResponseWriter, r *http.Request, f 
 	setCORSHeaders(w)
 	setCORPHeaders(w)
 	if notModified(r) {
+		setOutcome(r.Context(), outcomeNotModified)
 		respondNotModified(w)
 		return
 	}
@@ -435,6 +454,7 @@ func (s *Server) respondThumbnailBytes(w http.ResponseWriter, r *http.Request, d
 	setCORSHeaders(w)
 	setCORPHeaders(w)
 	if notModified(r) {
+		setOutcome(r.Context(), outcomeNotModified)
 		respondNotModified(w)
 		return
 	}
@@ -450,6 +470,7 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request) bool
 	token := ExtractToken(r)
 	if token == "" {
 		authOutcome.WithLabelValues("missing").Inc()
+		setOutcome(r.Context(), outcomeUnauthorized)
 		writeMatrixError(w, http.StatusUnauthorized, "M_MISSING_TOKEN",
 			"Missing access token")
 		return false
@@ -466,12 +487,14 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request) bool
 	}
 	if !verdict.valid {
 		authOutcome.WithLabelValues("rejected").Inc()
+		setOutcome(r.Context(), outcomeUnauthorized)
 		writeMatrixError(w, http.StatusUnauthorized, "M_UNKNOWN_TOKEN",
 			"Invalid access token passed.")
 		return false
 	}
 	authOutcome.WithLabelValues("accepted").Inc()
 	tokenCacheSize.Set(float64(s.auth.Len()))
+	annotate(r.Context(), func(rl *reqLog) { rl.user = verdict.userID })
 	return true
 }
 
@@ -494,6 +517,9 @@ func (s *Server) resolveLocalMedia(w http.ResponseWriter, r *http.Request, media
 		return nil, false
 	}
 	if media.Quarantined() {
+		annotate(r.Context(), func(rl *reqLog) {
+			rl.outcome, rl.reason = outcomeNotFound, "quarantined"
+		})
 		respondNotFound(w, r.URL.Path)
 		return nil, false
 	}
@@ -557,6 +583,7 @@ func (s *Server) localMediaPath(media *LocalMedia) (string, error) {
 
 func (s *Server) proxyDownload(w http.ResponseWriter, r *http.Request, reason string) {
 	proxiedTotal.WithLabelValues("download", reason).Inc()
+	setProxied(r.Context(), reason)
 	if s.downloadUp == nil {
 		respondNotFound(w, r.URL.Path)
 		return
@@ -566,7 +593,8 @@ func (s *Server) proxyDownload(w http.ResponseWriter, r *http.Request, reason st
 
 func (s *Server) proxyThumbnail(w http.ResponseWriter, r *http.Request, reason string) {
 	proxiedTotal.WithLabelValues("thumbnail", reason).Inc()
-	thumbnailOutcome.WithLabelValues("proxied").Inc()
+	thumbnailOutcome.WithLabelValues(outcomeProxied).Inc()
+	setProxied(r.Context(), reason)
 	if s.thumbnailUp == nil {
 		respondNotFound(w, r.URL.Path)
 		return

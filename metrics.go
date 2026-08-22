@@ -105,6 +105,7 @@ func (s *statusRecorder) ReadFrom(r io.Reader) (int64, error) {
 func instrument(endpoint string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		annotate(r.Context(), func(rl *reqLog) { rl.endpoint = endpoint })
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
 		if rec.status == 0 {

@@ -176,6 +176,43 @@ and Pillow's differ in the low bits by design.
 Then watch `synapse_media_worker_thumbnail_outcome_total` in production: if
 `proxied` is a large share, something is falling back more than it should.
 
+## Logs
+
+With `log.requests` on (the default) the worker writes one line per request
+saying what it did with it, which is the part the reverse proxy's own access log
+cannot see:
+
+```json
+{"level":"info","method":"GET","status":200,"bytes":109169,"duration":49.4,
+ "ip":"198.51.100.7","endpoint":"client_thumbnail",
+ "media":"mxc://example.com/abc123","thumb":"507x311/scale",
+ "outcome":"generated","user":"@alice:example.com"}
+```
+
+`outcome` is one of:
+
+| Outcome | Meaning |
+|---|---|
+| `served` | read straight from Synapse's media store |
+| `synapse_store` | a thumbnail Synapse had already generated |
+| `worker_cache` | a thumbnail this worker generated earlier |
+| `generated` | generated during this request |
+| `proxied` | handed back to Synapse; `reason` says why |
+| `not_modified` | answered 304 |
+| `not_found` | no such media, or quarantined (`reason`) |
+| `unauthorized` | missing or rejected access token |
+
+`ip` is taken from the leftmost `X-Forwarded-For` entry, so it is the real
+client rather than the proxy. Requests are logged at info, 4xx at warn (except
+404, which is routine for media) and 5xx at error, so raising the level to
+`warn` keeps the problems and drops the noise.
+
+To see how much work is being avoided:
+
+```sh
+docker compose logs media-worker | grep -o '"outcome":"[a-z_]*"' | sort | uniq -c
+```
+
 ## Development
 
 ```sh

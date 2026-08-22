@@ -72,3 +72,9 @@ upstream:
 log:
   level: info
   pretty: false
+  # One line per request, recording what the worker did with it: served from
+  # Synapse's store, from the worker's own thumbnail cache, generated, or
+  # proxied back to Synapse (with the reason). That last part is what a reverse
+  # proxy's own access log cannot tell you. Set false on a busy server if the
+  # proxy log is enough.
+  requests: true

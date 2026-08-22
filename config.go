@@ -124,6 +124,16 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 	// Pretty enables human-readable console output instead of JSON.
 	Pretty bool `yaml:"pretty"`
+	// Requests logs one line per request, recording what the worker did with
+	// it: served from disk, from its own cache, generated, or proxied back to
+	// Synapse. Set false on a busy server where the reverse proxy's own access
+	// log is enough.
+	Requests *bool `yaml:"requests"`
+}
+
+// LogRequests reports whether per-request logging is on, defaulting to true.
+func (c LogConfig) LogRequests() bool {
+	return c.Requests == nil || *c.Requests
 }
 
 func defaultConfig() Config {

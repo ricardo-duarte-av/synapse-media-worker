@@ -227,7 +227,7 @@ func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 	})
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	return withLogging(s.log, withCORSPreflight(mux))
+	return withRequestLog(s.log, s.cfg.Log.LogRequests(), withCORSPreflight(mux))
 }
 
 // withCORSPreflight answers CORS preflight requests before routing.
@@ -249,21 +249,6 @@ func withCORSPreflight(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
-}
-
-// withLogging records one line per request at debug level.
-func withLogging(log zerolog.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r)
-		log.Debug().
-			Str("method", r.Method).
-			Str("path", r.URL.Path).
-			Int("status", rec.status).
-			Dur("duration", time.Since(start)).
-			Msg("Request")
 	})
 }
 
