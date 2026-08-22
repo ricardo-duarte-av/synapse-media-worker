@@ -43,6 +43,7 @@ var (
 	serverName     = flag.String("server-name", "", "homeserver name")
 	keyPath        = flag.String("key", "", "path to Synapse's signing.key")
 	goURL          = flag.String("go-url", "http://127.0.0.1:18090", "base URL of the Go worker")
+	goSocket       = flag.String("go-socket", "", "unix socket of the Go worker; preferred over -go-url, since production listens on one and the transport has hidden bugs before")
 	synapseSocket  = flag.String("synapse-socket", "", "unix socket of a Synapse media worker")
 	synapseURL     = flag.String("synapse-url", "", "public base URL of the homeserver, e.g. https://example.com (preferred over -synapse-socket)")
 	dbURI          = flag.String("db", "", "Synapse database URI, used to sample media IDs")
@@ -108,27 +109,27 @@ func main() {
 	fmt.Printf("comparing %d local and %d remote media items (mode=%s)\n\n",
 		len(local), len(remote), *mode)
 
-	goClient := &http.Client{Timeout: 120 * time.Second}
+	goClient, goBase := newGoClient()
 	synClient, synBase := newSynapseClient()
 
 	var fedDown, fedThumb, cliDown, cliThumb, cond, rng result
 
 	if doFederation {
 		for _, m := range local {
-			compareDownload(goClient, synClient, synBase, key, m.mediaID, &fedDown)
+			compareDownload(goClient, goBase, synClient, synBase, key, m.mediaID, &fedDown)
 			for _, spec := range strings.Split(*thumbnailSizes, ",") {
-				compareThumbnail(goClient, synClient, synBase, key, m.mediaID, spec, &fedThumb)
+				compareThumbnail(goClient, goBase, synClient, synBase, key, m.mediaID, spec, &fedThumb)
 			}
 		}
 	}
 	if doClient {
 		all := append(append([]mediaRef{}, local...), remote...)
 		for _, m := range all {
-			compareClientDownload(goClient, synClient, synBase, m, token, &cliDown)
-			compareConditional(goClient, synClient, synBase, m, token, &cond)
-			compareRange(goClient, synClient, synBase, m, token, &rng)
+			compareClientDownload(goClient, goBase, synClient, synBase, m, token, &cliDown)
+			compareConditional(goClient, goBase, synClient, synBase, m, token, &cond)
+			compareRange(goClient, goBase, synClient, synBase, m, token, &rng)
 			for _, spec := range strings.Split(*thumbnailSizes, ",") {
-				compareClientThumbnail(goClient, synClient, synBase, m, spec, token, &cliThumb)
+				compareClientThumbnail(goClient, goBase, synClient, synBase, m, spec, token, &cliThumb)
 			}
 		}
 	}
@@ -157,10 +158,10 @@ func main() {
 
 // compareDownload fetches the same media from both workers and requires the
 // file bytes and the metadata headers to be identical.
-func compareDownload(goClient, synClient *http.Client, synBase string, key *federation.SigningKey, mediaID string, r *result) {
+func compareDownload(goClient *http.Client, goBase string, synClient *http.Client, synBase string, key *federation.SigningKey, mediaID string, r *result) {
 	path := "/_matrix/federation/v1/media/download/" + mediaID
 
-	goMeta, goBody, goStatus, err := fetchMultipart(goClient, *goURL, path, key)
+	goMeta, goBody, goStatus, err := fetchMultipart(goClient, goBase, path, key)
 	if err != nil {
 		fmt.Printf("  %s download: go worker error: %v\n", mediaID, err)
 		r.mismatch++
@@ -203,7 +204,7 @@ func compareDownload(goClient, synClient *http.Client, synBase string, key *fede
 // compareThumbnail requires the decoded dimensions and content type to match.
 // The bytes will not: Go's Lanczos implementation and Pillow's differ in the
 // low bits, which is expected and invisible.
-func compareThumbnail(goClient, synClient *http.Client, synBase string, key *federation.SigningKey, mediaID, spec string, r *result) {
+func compareThumbnail(goClient *http.Client, goBase string, synClient *http.Client, synBase string, key *federation.SigningKey, mediaID, spec string, r *result) {
 	var w, h int
 	var method string
 	if _, err := fmt.Sscanf(spec, "%dx%d:%s", &w, &h, &method); err != nil {
@@ -212,7 +213,7 @@ func compareThumbnail(goClient, synClient *http.Client, synBase string, key *fed
 	path := fmt.Sprintf("/_matrix/federation/v1/media/thumbnail/%s?width=%d&height=%d&method=%s",
 		mediaID, w, h, method)
 
-	goMeta, goBody, goStatus, err1 := fetchMultipart(goClient, *goURL, path, key)
+	goMeta, goBody, goStatus, err1 := fetchMultipart(goClient, goBase, path, key)
 	synMeta, synBody, synStatus, err2 := fetchMultipart(synClient, synBase, path, key)
 	if err1 != nil || err2 != nil {
 		r.skipped++
@@ -402,4 +403,21 @@ func newSynapseClient() (*http.Client, string) {
 			return d.DialContext(ctx, "unix", *synapseSocket)
 		}},
 	}, "http://synapse"
+}
+
+// newGoClient targets the worker under test. Production listens on a unix
+// socket, and a unix peer address is not host:port -- a difference that has
+// already hidden a header-forwarding bug from a TCP-only test run. Prefer the
+// socket so the harness exercises the same transport.
+func newGoClient() (*http.Client, string) {
+	if *goSocket != "" {
+		return &http.Client{
+			Timeout: 120 * time.Second,
+			Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", *goSocket)
+			}},
+		}, "http://media-worker"
+	}
+	return &http.Client{Timeout: 120 * time.Second}, strings.TrimRight(*goURL, "/")
 }

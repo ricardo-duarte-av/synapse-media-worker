@@ -163,11 +163,20 @@ client access token needed — and diffs the bytes and the headers clients act o
 go run ./tools/parity \
   -server-name example.com \
   -key /opt/matrix/synapse/synapse/example.com.signing.key \
-  -go-url http://127.0.0.1:18090 \
-  -synapse-socket /var/sockets/nginx/av-media-worker-1.sock \
+  -go-socket /var/sockets/nginx/av-media-worker-go.sock \
+  -synapse-url https://example.com \
   -db "postgres://synapse:PASSWORD@/synapse-db?host=/var/sockets&sslmode=disable" \
   -n 100
 ```
+
+Add `-mode client -token-file <path>` to compare the authenticated client
+endpoints as well, which is the only way to reach remote media.
+
+Use `-go-socket` rather than `-go-url` where the worker listens on a socket. A
+unix peer address is not `host:port`, and that difference has already hidden a
+header-forwarding bug from a TCP-only run: `net/http`'s `SetXForwarded` drops
+`X-Forwarded-For` entirely on a unix listener, which made every uncached remote
+media fetch fail. Test the transport you actually run.
 
 It exits non-zero on any mismatch. Downloads are compared byte for byte;
 thumbnails are compared on decoded dimensions and headers, because Go's Lanczos

@@ -66,7 +66,7 @@ func NewProxy(t UpstreamTarget, log zerolog.Logger) (*Proxy, error) {
 			// Preserve the original Host so Synapse's own routing and any
 			// virtual-host logic behave as if it had been called directly.
 			r.Out.Host = r.In.Host
-			r.SetXForwarded()
+			forwardXForwardedFor(r)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			p.log.Warn().Err(err).
@@ -87,3 +87,52 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Target describes where this proxy points, for logging.
 func (p *Proxy) Target() string { return p.target }
+
+// forwardXForwardedFor carries the X-Forwarded-* chain through to Synapse.
+//
+// Two things conspire here. ReverseProxy strips Forwarded and every
+// X-Forwarded-* header from the outbound request whenever a Rewrite hook is
+// set, leaving it to the hook to restore them. And ProxyRequest.SetXForwarded,
+// the obvious way to do that, *deletes* X-Forwarded-For when the inbound peer
+// address is not host:port -- which is exactly what a unix socket listener
+// produces.
+//
+// Synapse needs that header: synapse/rest/client/media.py reads
+// request.getClientAddress().host for rate limiting on the remote-media path,
+// and on a unix socket with no X-Forwarded-For that is a UNIXAddress with no
+// .host, so the request dies with
+//
+//	AttributeError: 'UNIXAddress' object has no attribute 'host'
+//
+// which surfaces as a 500 on every uncached remote media fetch. So the chain
+// from the proxy in front is copied across explicitly, and our own peer is
+// appended only when it is a real TCP address.
+func forwardXForwardedFor(r *httputil.ProxyRequest) {
+	prior := r.In.Header.Get("X-Forwarded-For")
+	clientIP, _, err := net.SplitHostPort(r.In.RemoteAddr)
+	switch {
+	case err == nil && prior != "":
+		r.Out.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+	case err == nil:
+		r.Out.Header.Set("X-Forwarded-For", clientIP)
+	case prior != "":
+		// Unix socket listener: we have no address of our own to add, but the
+		// chain from the proxy in front must still reach Synapse.
+		r.Out.Header.Set("X-Forwarded-For", prior)
+	}
+
+	// Preserve the front proxy's view of the original request where it gave
+	// one, since it knows the real scheme and host and this worker does not.
+	if host := r.In.Header.Get("X-Forwarded-Host"); host != "" {
+		r.Out.Header.Set("X-Forwarded-Host", host)
+	} else {
+		r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
+	}
+	if proto := r.In.Header.Get("X-Forwarded-Proto"); proto != "" {
+		r.Out.Header.Set("X-Forwarded-Proto", proto)
+	} else if r.In.TLS != nil {
+		r.Out.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		r.Out.Header.Set("X-Forwarded-Proto", "http")
+	}
+}

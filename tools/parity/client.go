@@ -91,10 +91,10 @@ func clientFetch(client *http.Client, base, path, token string, extra http.Heade
 }
 
 // compareClientDownload diffs a download across both workers.
-func compareClientDownload(goClient, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
+func compareClientDownload(goClient *http.Client, goBase string, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
 	path := fmt.Sprintf("/_matrix/client/v1/media/download/%s/%s", m.server(*serverName), m.mediaID)
 
-	goResp, goBody, err1 := clientFetch(goClient, *goURL, path, token, nil)
+	goResp, goBody, err1 := clientFetch(goClient, goBase, path, token, nil)
 	synResp, synBody, err2 := clientFetch(synClient, synBase, path, token, nil)
 	if err1 != nil || err2 != nil {
 		fmt.Printf("  %s download: transport error (go=%v synapse=%v)\n", m, err1, err2)
@@ -124,7 +124,7 @@ func compareClientDownload(goClient, synClient *http.Client, synBase string, m m
 }
 
 // compareClientThumbnail diffs a thumbnail across both workers.
-func compareClientThumbnail(goClient, synClient *http.Client, synBase string, m mediaRef, spec, token string, r *result) {
+func compareClientThumbnail(goClient *http.Client, goBase string, synClient *http.Client, synBase string, m mediaRef, spec, token string, r *result) {
 	var w, h int
 	var method string
 	if _, err := fmt.Sscanf(spec, "%dx%d:%s", &w, &h, &method); err != nil {
@@ -133,7 +133,7 @@ func compareClientThumbnail(goClient, synClient *http.Client, synBase string, m 
 	path := fmt.Sprintf("/_matrix/client/v1/media/thumbnail/%s/%s?width=%d&height=%d&method=%s",
 		m.server(*serverName), m.mediaID, w, h, method)
 
-	goResp, goBody, err1 := clientFetch(goClient, *goURL, path, token, nil)
+	goResp, goBody, err1 := clientFetch(goClient, goBase, path, token, nil)
 	synResp, synBody, err2 := clientFetch(synClient, synBase, path, token, nil)
 	if err1 != nil || err2 != nil {
 		r.skipped++
@@ -170,11 +170,11 @@ func compareClientThumbnail(goClient, synClient *http.Client, synBase string, m 
 
 // compareConditional checks the 304 handshake, which depends on Synapse's
 // unusual unquoted constant ETag.
-func compareConditional(goClient, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
+func compareConditional(goClient *http.Client, goBase string, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
 	path := fmt.Sprintf("/_matrix/client/v1/media/download/%s/%s", m.server(*serverName), m.mediaID)
 	extra := http.Header{"If-None-Match": []string{"1"}}
 
-	goResp, _, err1 := clientFetch(goClient, *goURL, path, token, extra)
+	goResp, _, err1 := clientFetch(goClient, goBase, path, token, extra)
 	synResp, _, err2 := clientFetch(synClient, synBase, path, token, extra)
 	if err1 != nil || err2 != nil {
 		r.skipped++
@@ -192,7 +192,7 @@ func compareConditional(goClient, synClient *http.Client, synBase string, m medi
 // answers 200 with the whole body; the worker answers 206 with the slice. That
 // divergence is intentional, so this asserts the worker's own correctness and
 // that the bytes agree with Synapse's full body.
-func compareRange(goClient, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
+func compareRange(goClient *http.Client, goBase string, synClient *http.Client, synBase string, m mediaRef, token string, r *result) {
 	path := fmt.Sprintf("/_matrix/client/v1/media/download/%s/%s", m.server(*serverName), m.mediaID)
 
 	synResp, synBody, err := clientFetch(synClient, synBase, path, token, nil)
@@ -201,7 +201,7 @@ func compareRange(goClient, synClient *http.Client, synBase string, m mediaRef, 
 		return
 	}
 	extra := http.Header{"Range": []string{"bytes=0-1023"}}
-	goResp, goBody, err := clientFetch(goClient, *goURL, path, token, extra)
+	goResp, goBody, err := clientFetch(goClient, goBase, path, token, extra)
 	if err != nil {
 		r.skipped++
 		return
