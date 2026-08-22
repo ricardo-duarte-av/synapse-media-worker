@@ -73,7 +73,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # .dockerignore strips .git, so the build cannot read these itself.
           build-args: |
-            TAG=${{ github.ref_type == 'tag' && github.ref_name || 'unknown' }}
+            # ref_name is the tag for a tag push and the branch otherwise,
+            # so -version always reports something meaningful.
+            TAG=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
             BUILD_TIME=${{ github.event.repository.updated_at }}
           cache-from: type=gha
