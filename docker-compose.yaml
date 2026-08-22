@@ -1,0 +1,76 @@
+# synapse-media-worker
+#
+# Runs alongside an existing Synapse deployment, reading its Postgres database
+# and media store directly. It does not replace Synapse's media workers: keep
+# those for uploads, URL previews, admin endpoints, and the requests this
+# worker proxies back to them.
+#
+# Before first start:
+#   1. cp config.sample.yaml config.yaml   and fill in server_name, the
+#      database URI, and the socket paths.
+#   2. Create the cache directory and give it to the container's uid:
+#        sudo mkdir -p /share/aguiarvieira.pt/media_cache_go
+#        sudo chown 991:991 /share/aguiarvieira.pt/media_cache_go
+#      991 is Synapse's uid in the official image; the worker runs as the same
+#      uid so it can read media_store. Override with `user:` if yours differs.
+#   3. docker compose run --rm media-worker -check    to validate access.
+#
+# Paths can be overridden with an .env file rather than editing this one.
+
+services:
+  media-worker:
+    image: ghcr.io/ricardo-duarte-av/synapse-media-worker:latest
+    # To build from a local checkout instead of pulling the published image,
+    # comment out `image:` above and uncomment this:
+    # build: .
+    container_name: av-media-worker-go
+    restart: unless-stopped
+
+    volumes:
+      # Synapse's media store, READ-ONLY. This mount option is what guarantees
+      # the worker never writes to it; the worker also refuses to start if its
+      # cache directory is nested inside the store.
+      - ${SYNAPSE_MEDIA_STORE:-/share/aguiarvieira.pt/media_store}:/data/media_store:ro
+
+      # The worker's own cache, for thumbnails it generates. Must be writable
+      # by the container's uid. Do not mount this noatime: LRU eviction orders
+      # by access time and would lose its ordering.
+      - ${MEDIA_WORKER_CACHE:-/share/aguiarvieira.pt/media_cache_go}:/data/cache
+
+      # Shared socket directory: Postgres, the Synapse workers this one proxies
+      # to, and the socket this worker listens on.
+      - ${SOCKET_DIR:-/var/sockets}:/var/sockets
+
+      # Synapse's signing key, used to authenticate outbound server-key lookups
+      # while verifying inbound federation requests. Read-only.
+      - ${SYNAPSE_SIGNING_KEY:-/opt/matrix/synapse/synapse/aguiarvieira.pt.signing.key}:/data/signing.key:ro
+
+      - ./config.yaml:/data/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "--unix-socket", "/var/sockets/nginx/av-media-worker-go.sock", "http://localhost/health"]
+      start_period: "5s"
+      interval: "10s"
+      timeout: "5s"
+      retries: 3
+
+    # Outbound HTTPS is required: verifying an inbound federation request means
+    # fetching the origin server's signing keys. Everything else is over unix
+    # sockets.
+    networks:
+      - default
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# If you are adding this to an existing Synapse stack, replace the `networks`
+# block above with that stack's networks, for example:
+#
+# networks:
+#   npm-nw:
+#     external: true
+#   npm-nw6:
+#     external: true

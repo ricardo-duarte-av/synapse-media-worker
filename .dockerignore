@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+*.md
+!README.md
+config.yaml
+*.log
+synapse-media-worker
+tools

@@ -1,0 +1,74 @@
+# synapse-media-worker configuration.
+#
+# The worker reads Synapse's media store and database directly. Values here
+# must agree with homeserver.yaml; they are duplicated rather than parsed out of
+# it so the worker has no coupling to Synapse's config schema.
+
+# Must match homeserver.yaml's server_name.
+server_name: "example.com"
+
+listen:
+  # Unix socket to listen on. Takes precedence over addr.
+  socket: /var/sockets/nginx/av-media-worker-go.sock
+  socket_mode: 0666
+  # addr: ":8090"
+  # Optional separate listener for Prometheus. /metrics is also served on the
+  # main listener, so set this only if you want it reachable separately.
+  metrics_addr: ":9110"
+
+database:
+  # libpq connection string. For a unix socket, put the *directory* containing
+  # the socket in the host parameter.
+  uri: "postgres://synapse:CHANGEME@/synapse-db?host=/var/sockets&sslmode=disable"
+  max_conns: 16
+  # last_access_ts is the only thing the worker ever writes to Synapse's
+  # database. Turning it off means media retention and LRU cleanup will treat
+  # everything this worker serves as never accessed, and may delete it.
+  update_last_access: true
+  last_access_interval: 1m
+
+media:
+  # Synapse's media_store_path. Mount it read-only.
+  store_path: /data/media_store
+  # Synapse's signing key, used to authenticate outbound server-key lookups
+  # while verifying inbound federation requests.
+  signing_key_path: /data/signing.key
+  # Must match homeserver.yaml's max_image_pixels.
+  max_image_pixels: 100000000
+  # How long to wait for an in-progress async upload before returning 504.
+  default_timeout: 20s
+  max_timeout: 60s
+  # Must match homeserver.yaml's enable_authenticated_media (default true).
+  # When true, media rows with authenticated = true are hidden from the legacy
+  # unauthenticated /_matrix/media endpoints.
+  enable_authenticated_media: true
+
+cache:
+  # The worker's own writable directory for thumbnails it generates. This must
+  # NOT be inside media.store_path; the worker refuses to start if it is.
+  # Do not mount this volume noatime, or LRU eviction loses its ordering.
+  dir: /data/cache
+  max_bytes: 10737418240 # 10 GiB
+  sweep_interval: 10m
+
+auth:
+  # Access tokens are validated by asking Synapse, because appservice tokens
+  # and delegated auth (MAS) are not resolvable from the access_tokens table.
+  # Point this at any worker that serves the client API.
+  whoami_socket: /var/sockets/nginx/av-request-worker-1.sock
+  # whoami_url: "https://example.com"
+  positive_ttl: 5m
+  negative_ttl: 30s
+  max_entries: 20000
+
+upstream:
+  # Where to send requests the worker will not answer itself: remote media that
+  # Synapse has not cached yet, and thumbnails it cannot generate.
+  download:
+    socket: /var/sockets/nginx/av-media-worker-1.sock
+  thumbnail:
+    socket: /var/sockets/nginx/av-media-worker-thumbnails.sock
+
+log:
+  level: info
+  pretty: false

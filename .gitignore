@@ -30,3 +30,16 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# --- synapse-media-worker ---
+
+# The compiled binary shares its name with the repository, so the Go template's
+# rules do not catch it.
+/synapse-media-worker
+
+# Real configuration, which carries database credentials.
+/config.yaml
+/.env
+
+*.log
+.claude/
