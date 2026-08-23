@@ -191,6 +191,68 @@ Two details that matter:
   when it serves the thumbnail, so a row disagreeing with the file would
   truncate the response.
 
+## Uploads (`accept_uploads`)
+
+Off by default. When on, the worker handles `POST /_matrix/media/{r0,v1,v3}/upload`,
+`POST /_matrix/media/v1/create` and `PUT /_matrix/media/v3/upload/{server}/{id}`
+itself instead of proxying them.
+
+Unlike remote fetching, **uploads do not fall back to Synapse.** Once the worker
+has read a client's body there is no honest way to hand it on, and a fallback
+would mean two systems could both believe they own a media ID. A failure is an
+error the client can retry, not a silent hand-off. The invariant that matters is
+that no failure leaves a file without its row: every path that fails after the
+bytes are in place removes them first.
+
+### Matching Synapse
+
+| Column | Value |
+|---|---|
+| `media_id` | 24 chars of `A-Za-z`, and for local media this is also the file_id on disk |
+| `sha256` | lowercase hex of the raw bytes, hashed while streaming |
+| `authenticated` | from `enable_authenticated_media` |
+| `media_type` | trusted verbatim from the request; missing → `application/octet-stream` |
+| `upload_name` | from `?filename=`, stored unsanitised, as Synapse does |
+
+Three behaviours worth knowing:
+
+**Appservice masquerading is resolved by asking Synapse.** An appservice token
+resolves to a different user depending on `?user_id=`, so that parameter (and
+`?device_id=`) is forwarded to `/account/whoami` and the MXID it returns is what
+lands in `user_id`. Trusting the parameter directly would let an appservice
+token write media as any local user; the namespace check is the only thing
+stopping that. The token cache is keyed on the token *and* the masquerade
+parameters, since one token maps to many users.
+
+**Hash quarantine is silent.** Content whose sha256 matches something already
+quarantined is still stored and still answered `200`, with
+`quarantined_by = 'system'` so it will not be served. That is Synapse's
+behaviour, and not reproducing it would make this a way to re-upload
+quarantined content. If the check itself errors the upload fails rather than
+guessing — failing open would let the content through, and failing closed would
+hand back a `200` for media that is silently unusable.
+
+**Async completion needs no lock.** Synapse holds a cross-worker lock across the
+whole PUT because its completing UPDATE is unconditional. This worker adds
+`AND media_length IS NULL` instead, so a second writer affects zero rows and is
+told `409 M_CANNOT_OVERWRITE_MEDIA` — the same status, from the database, with
+no lock table or renewal to keep in sync. This requires that **all** PUTs route
+to the worker: a Synapse worker handling one concurrently could still clobber it
+with its unconditional UPDATE.
+
+### No thumbnails at upload
+
+`upload_thumbnails: none` by default. Synapse generates its default set on every
+upload, but under `dynamic_thumbnails` those are written in a type no request
+path can ask for — on one real server, 81% of local thumbnails (2 GB) are
+unreachable — and only 18.7% of uploads are ever viewed at thumbnail size at
+all. Thumbnails are still generated on demand, which is what serves every
+request anyway.
+
+Set `upload_thumbnails: synapse` for byte-parity if you need it. Note that with
+`dynamic_thumbnails` off, Synapse selects a nearest match from stored
+thumbnails, and media uploaded through this worker would have none to score.
+
 ## Concurrency
 
 Every request runs in its own goroutine, so the worker serves as many at once

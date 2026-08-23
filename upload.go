@@ -111,7 +111,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	quarantinedBy := s.uploader.quarantineFor(r, stored.sha256)
+	quarantinedBy, err := s.uploader.quarantineFor(r.Context(), stored.sha256)
+	if err != nil {
+		_ = os.Remove(stored.path)
+		s.uploadFailed(w, r, uploadEndpointSync, err, "checking quarantined hashes")
+		return
+	}
 
 	now := time.Now().UnixMilli()
 	media := &LocalMedia{
@@ -243,7 +248,12 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 		s.uploadFailed(w, r, uploadEndpointAsync, err, "storing upload")
 		return
 	}
-	quarantinedBy := s.uploader.quarantineFor(r, stored.sha256)
+	quarantinedBy, err := s.uploader.quarantineFor(r.Context(), stored.sha256)
+	if err != nil {
+		_ = os.Remove(stored.path)
+		s.uploadFailed(w, r, uploadEndpointAsync, err, "checking quarantined hashes")
+		return
+	}
 
 	// Conditional on the media still being pending. Synapse needs a
 	// cross-worker lock here because its UPDATE is unconditional; letting the
@@ -418,17 +428,20 @@ var errUploadTooLarge = errors.New("upload body exceeds max_upload_size")
 // quarantineFor reproduces Synapse's silent hash quarantine: content matching
 // something already quarantined is still stored and still answered 200, but the
 // row is flagged so it will not be served.
-func (u *Uploader) quarantineFor(r *http.Request, sha256hex string) string {
-	quarantined, err := u.db.IsHashQuarantined(r.Context(), sha256hex)
+//
+// An error here fails the upload rather than guessing. Failing open would let
+// quarantined content back in; failing closed would hand the uploader a 200 for
+// media that is silently unusable, which is worse than an honest error they can
+// retry. Synapse propagates the error too.
+func (u *Uploader) quarantineFor(ctx context.Context, sha256hex string) (string, error) {
+	quarantined, err := u.db.IsHashQuarantined(ctx, sha256hex)
 	if err != nil {
-		// Failing open here would let quarantined content back in, so treat an
-		// error as a match; the upload still succeeds either way.
-		return quarantinedBySystem
+		return "", fmt.Errorf("checking quarantined hashes: %w", err)
 	}
 	if quarantined {
-		return quarantinedBySystem
+		return quarantinedBySystem, nil
 	}
-	return ""
+	return "", nil
 }
 
 // maybeThumbnail generates Synapse's upload-time thumbnail set, when configured
