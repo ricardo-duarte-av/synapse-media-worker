@@ -164,6 +164,15 @@ func (t *Thumbnailer) acquire(ctx context.Context) error {
 
 func (t *Thumbnailer) release() { <-t.slots }
 
+// baseMediaType strips any parameters and normalises case, the way Synapse's
+// _get_thumbnail_requirements does before looking a type up. Media stored with
+// "image/png; charset=binary" is still a PNG, and treating it as unthumbnailable
+// meant handing perfectly decodable images to Synapse to do instead.
+func baseMediaType(mediaType string) string {
+	base, _, _ := strings.Cut(mediaType, ";")
+	return strings.ToLower(strings.TrimSpace(base))
+}
+
 // decodableSourceTypes mirrors Synapse's PILLOW_FORMATS: the decoders that are
 // part of the trusted computing base. Anything else is refused rather than
 // guessed at.
@@ -175,7 +184,7 @@ var decodableSourceTypes = map[string]struct{}{
 // CanGenerate reports whether the worker is able to produce this thumbnail
 // itself. When false, the caller should proxy to Synapse.
 func (t *Thumbnailer) CanGenerate(sourceType string, req ThumbnailRequest) bool {
-	if _, ok := decodableSourceTypes[strings.ToLower(sourceType)]; !ok {
+	if _, ok := decodableSourceTypes[baseMediaType(sourceType)]; !ok {
 		return false
 	}
 	// Animated output needs a WebP encoder, which the standard library does not

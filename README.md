@@ -358,6 +358,32 @@ Derived settings from Synapse's configuration
 It also warns about Synapse settings it cannot honour — `media_storage_providers`,
 `prevent_media_downloads_from`, and `dynamic_thumbnails: false` (see below).
 
+### Which media can be thumbnailed
+
+The worker decodes exactly what Synapse decodes, which is a much shorter list
+than the formats Matrix carries:
+
+| Source | Thumbnail produced |
+|---|---|
+| `image/jpeg`, `image/jpg`, `image/webp` | `image/jpeg` |
+| `image/png`, `image/gif` | `image/png` |
+| everything else | none |
+
+That is `THUMBNAIL_SUPPORTED_MEDIA_FORMAT_MAP` and `PILLOW_FORMATS` from
+Synapse, matched deliberately. **Video is never thumbnailed** — not by Synapse
+either — and neither are `image/svg+xml`, `image/avif`, `image/bmp`,
+`image/heic` or `image/x-icon`. A thumbnail request for any of them gets
+`400 M_UNKNOWN "Failed to generate thumbnail."`, which is what Synapse answers.
+Verified against real media of each type on a live server.
+
+Content-type parameters are stripped before the lookup, as Synapse does, so
+media stored as `image/png; charset=binary` is still thumbnailed rather than
+being treated as an unknown format.
+
+The one format where the two differ is **animated WebP**: Synapse produces it,
+this worker does not, so `?animated=true` is proxied. Still WebP is decoded
+normally.
+
 ### `dynamic_thumbnails: false` is not yet supported
 
 The worker only implements the dynamic behaviour: exact match on width, height,

@@ -197,3 +197,62 @@ func TestConcurrencyDefaultsToCPUCount(t *testing.T) {
 		t.Errorf("default limit = %d, want GOMAXPROCS %d", cap(th.slots), runtime.GOMAXPROCS(0))
 	}
 }
+
+// Synapse strips content-type parameters before deciding whether it can
+// thumbnail something. Media stored as "image/png; charset=binary" is still a
+// PNG; treating it as unthumbnailable handed decodable images to Synapse to do
+// instead, which a live request confirmed.
+func TestCanGenerateStripsContentTypeParameters(t *testing.T) {
+	th := NewThumbnailer(100_000_000, 2)
+	req := ThumbnailRequest{Width: 96, Height: 96, Method: "crop", Type: typePNG}
+
+	for _, ct := range []string{
+		"image/png; charset=binary",
+		"image/jpeg;charset=utf-8",
+		"IMAGE/PNG; charset=binary",
+		"  image/webp ; foo=bar",
+	} {
+		if !th.CanGenerate(ct, req) {
+			t.Errorf("%q should be thumbnailable; Synapse strips the parameters", ct)
+		}
+	}
+	// Stripping must not make unsupported types look supported.
+	for _, ct := range []string{
+		"video/mp4", "image/svg+xml; charset=utf-8", "image/avif", "image/bmp",
+		"application/pdf", "",
+	} {
+		if th.CanGenerate(ct, req) {
+			t.Errorf("%q should not be thumbnailable", ct)
+		}
+	}
+}
+
+func TestBaseMediaType(t *testing.T) {
+	cases := map[string]string{
+		"image/png":                 "image/png",
+		"image/png; charset=binary": "image/png",
+		"IMAGE/PNG":                 "image/png",
+		"  image/webp ; q=1":        "image/webp",
+		"":                          "",
+	}
+	for in, want := range cases {
+		if got := baseMediaType(in); got != want {
+			t.Errorf("baseMediaType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The upload-time format map must agree with what the thumbnailer can decode,
+// or uploads would be told to generate something that then fails.
+func TestUploadFormatMapAgreesWithDecodableTypes(t *testing.T) {
+	th := NewThumbnailer(100_000_000, 2)
+	req := ThumbnailRequest{Width: 96, Height: 96, Method: "crop", Type: typePNG}
+	for _, ct := range []string{"image/jpeg", "image/jpg", "image/webp", "image/gif", "image/png"} {
+		if _, ok := synapseThumbnailType(ct); !ok {
+			t.Errorf("%q is missing from the upload format map", ct)
+		}
+		if !th.CanGenerate(ct, req) {
+			t.Errorf("%q is in the format map but the thumbnailer cannot decode it", ct)
+		}
+	}
+}

@@ -628,7 +628,7 @@ var synapseDefaultThumbnailSizes = []struct {
 // format Synapse produces for a given source. Note webp sources yield jpeg
 // thumbnails, and gif yields png because gif can carry transparency.
 func synapseThumbnailType(sourceType string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(strings.SplitN(sourceType, ";", 2)[0])) {
+	switch baseMediaType(sourceType) {
 	case "image/jpeg", "image/jpg", "image/webp":
 		return typeJPEG, true
 	case "image/gif", "image/png":
