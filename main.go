@@ -162,7 +162,6 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		// the guard widens only here.
 		srv.paths.AllowUploadWrites()
 		srv.uploader = NewUploader(db, srv.paths, srv.thumbnailer, cfg)
-		sweepStaleUploads(cfg.Media.StorePath, log)
 		log.Warn().
 			Str("thumbnails", cfg.Media.UploadThumbnails).
 			Int("max_concurrent", cfg.Media.MaxConcurrentUploads).
@@ -220,6 +219,14 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 	log.Info().Str("listen", describeListener(cfg.Listen)).
 		Str("server_name", cfg.ServerName).
 		Msg("Media worker ready")
+
+	if cfg.Media.AcceptUploads {
+		// Deliberately after the listener is up and in the background: this
+		// walks every file under local_content and local_thumbnails, which on
+		// a large store takes minutes. Doing it before binding the socket meant
+		// nothing could reach the worker until it finished.
+		go sweepStaleUploads(cfg.Media.StorePath, log, stopJanitor)
+	}
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -490,17 +497,29 @@ func logDerivedConfig(log zerolog.Logger, cfg *Config) {
 // sweepStaleUploads removes temporary files left by an interrupted upload.
 //
 // The temp file lives in the destination directory so it can be renamed
-// atomically, which means a crash mid-upload leaks it there. On a volume this
-// close to full that is worth cleaning up at startup rather than letting it
-// accumulate.
-func sweepStaleUploads(base string, log zerolog.Logger) {
-	var removed int
+// atomically, which means a hard crash mid-upload leaks one there. Those are
+// rare -- every failure path removes its own -- so this is hygiene, not
+// something to hold startup for.
+//
+// It walks the whole of local_content and local_thumbnails, which takes minutes
+// on a large store, so it runs in the background after the worker is already
+// serving and gives up promptly on shutdown.
+func sweepStaleUploads(base string, log zerolog.Logger, stop <-chan struct{}) {
+	started := time.Now()
+	var removed, scanned int
+
 	for _, dir := range []string{"local_content", "local_thumbnails"} {
 		root := filepath.Join(base, dir)
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			select {
+			case <-stop:
+				return filepath.SkipAll
+			default:
+			}
 			if err != nil || d.IsDir() {
 				return nil
 			}
+			scanned++
 			name := d.Name()
 			if !strings.HasPrefix(name, ".incoming-") && !strings.HasPrefix(name, ".thumb-") {
 				return nil
@@ -514,8 +533,17 @@ func sweepStaleUploads(base string, log zerolog.Logger) {
 			}
 			return nil
 		})
+		if err != nil {
+			log.Debug().Err(err).Str("dir", dir).Msg("Stale upload sweep interrupted")
+			return
+		}
 	}
+
+	event := log.Debug()
 	if removed > 0 {
-		log.Info().Int("removed", removed).Msg("Swept stale upload temporary files")
+		event = log.Info()
 	}
+	event.Int("removed", removed).Int("scanned", scanned).
+		Dur("took", time.Since(started)).
+		Msg("Swept stale upload temporary files")
 }
