@@ -364,6 +364,16 @@ and Pillow's differ in the low bits by design.
 Then watch `synapse_media_worker_thumbnail_outcome_total` in production: if
 `proxied` is a large share, something is falling back more than it should.
 
+## Metrics and dashboard
+
+`/metrics` is served on whatever the worker listens on, plus an optional
+separate `listen.metrics_addr`. A Grafana dashboard and the scrape
+configuration are in [`dashboards/`](dashboards/).
+
+The usual deployment listens on a unix socket, which Prometheus cannot scrape,
+so `metrics_addr` is what makes the dashboard usable. Keep that port internal:
+`/metrics` is unauthenticated.
+
 ## Logs
 
 With `log.requests` on (the default) the worker writes one line per request
