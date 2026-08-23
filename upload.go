@@ -32,6 +32,23 @@ import (
 // already-quarantined hash.
 const quarantinedBySystem = "system"
 
+// Upload endpoints and outcomes, kept as separate metric dimensions.
+const (
+	uploadEndpointSync   = "sync"
+	uploadEndpointCreate = "create"
+	uploadEndpointAsync  = "async"
+
+	uploadResultStored    = "stored"
+	uploadResultReserved  = "reserved"
+	uploadResultTooLarge  = "too_large"
+	uploadResultLimited   = "limited"
+	uploadResultForbidden = "forbidden"
+	uploadResultNotFound  = "not_found"
+	uploadResultConflict  = "conflict"
+	uploadResultFailed    = "failed"
+	uploadResultProxied   = "proxied"
+)
+
 // uploadResponse is the body both upload endpoints return.
 type uploadResponse struct {
 	ContentURI string `json:"content_uri"`
@@ -90,7 +107,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	mediaID := newFilesystemID() // Synapse uses the same random_string(24)
 	stored, err := s.uploader.store(r, mediaID, mediaType, length)
 	if err != nil {
-		s.uploadFailed(w, r, err, "storing upload")
+		s.uploadFailed(w, r, uploadEndpointSync, err, "storing upload")
 		return
 	}
 
@@ -104,12 +121,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.StoreLocalMedia(r.Context(), media, stored.sha256,
 		s.cfg.Media.AuthenticatedMedia(), quarantinedBy); err != nil {
 		_ = os.Remove(stored.path)
-		s.uploadFailed(w, r, err, "recording upload")
+		s.uploadFailed(w, r, uploadEndpointSync, err, "recording upload")
 		return
 	}
 
 	s.uploader.maybeThumbnail(r, mediaID, stored.path, mediaType)
-	s.respondUploaded(w, r, mediaID, user, stored.length, quarantinedBy)
+	s.respondUploaded(w, r, uploadEndpointSync, mediaID, user, stored.length, quarantinedBy)
 }
 
 // --- POST /_matrix/media/v1/create -----------------------------------------
@@ -138,6 +155,7 @@ func (s *Server) handleCreateMedia(w http.ResponseWriter, r *http.Request) {
 			retryAfter = 0
 		}
 		setOutcome(r.Context(), outcomeLimited)
+		uploadsTotal.WithLabelValues(uploadEndpointCreate, uploadResultLimited).Inc()
 		writeRateLimited(w, retryAfter)
 		return
 	}
@@ -152,6 +170,8 @@ func (s *Server) handleCreateMedia(w http.ResponseWriter, r *http.Request) {
 
 	setMedia(r.Context(), "", mediaID)
 	setOutcome(r.Context(), outcomeReserved)
+	uploadsTotal.WithLabelValues(uploadEndpointCreate, uploadResultReserved).Inc()
+	pendingMediaReserved.Inc()
 	writeJSON(w, http.StatusOK, createResponse{
 		ContentURI:      "mxc://" + s.cfg.ServerName + "/" + mediaID,
 		UnusedExpiresAt: now + s.cfg.Media.UnusedExpirationTime.Milliseconds(),
@@ -174,6 +194,7 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 	setMedia(r.Context(), "", mediaID)
 
 	if !s.isMine(serverName) {
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultNotFound).Inc()
 		writeMatrixError(w, http.StatusNotFound, "M_NOT_FOUND", "Non-local server name specified")
 		return
 	}
@@ -187,6 +208,7 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 	// else's completed media therefore gets 403 rather than 409.
 	media, err := s.db.GetLocalMedia(r.Context(), mediaID)
 	if errors.Is(err, ErrNotFound) {
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultNotFound).Inc()
 		writeMatrixError(w, http.StatusNotFound, "M_NOT_FOUND", "Unknown media ID")
 		return
 	} else if err != nil {
@@ -194,16 +216,19 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if media.UserID != user {
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultForbidden).Inc()
 		writeMatrixError(w, http.StatusForbidden, "M_FORBIDDEN",
 			"Only the creator of the media ID can upload to it")
 		return
 	}
 	if media.Length != nil {
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultConflict).Inc()
 		writeMatrixError(w, http.StatusConflict, "M_CANNOT_OVERWRITE_MEDIA",
 			"Media ID already has content")
 		return
 	}
 	if media.CreatedTS < time.Now().Add(-s.cfg.Media.UnusedExpirationTime).UnixMilli() {
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultNotFound).Inc()
 		writeMatrixError(w, http.StatusNotFound, "M_NOT_FOUND", "Media ID has expired")
 		return
 	}
@@ -215,7 +240,7 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 
 	stored, err := s.uploader.store(r, mediaID, mediaType, length)
 	if err != nil {
-		s.uploadFailed(w, r, err, "storing upload")
+		s.uploadFailed(w, r, uploadEndpointAsync, err, "storing upload")
 		return
 	}
 	quarantinedBy := s.uploader.quarantineFor(r, stored.sha256)
@@ -227,21 +252,21 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 		stored.length, stored.sha256, quarantinedBy)
 	if err != nil {
 		_ = os.Remove(stored.path)
-		s.uploadFailed(w, r, err, "completing upload")
+		s.uploadFailed(w, r, uploadEndpointAsync, err, "completing upload")
 		return
 	}
 	if !won {
 		// Someone completed it between our check and our write. Their bytes
 		// are the ones the row describes, so ours must go.
 		_ = os.Remove(stored.path)
+		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultConflict).Inc()
 		writeMatrixError(w, http.StatusConflict, "M_CANNOT_OVERWRITE_MEDIA",
 			"Media ID already has content")
 		return
 	}
 
 	s.uploader.maybeThumbnail(r, mediaID, stored.path, mediaType)
-	s.respondUploaded(w, r, mediaID, user, stored.length, quarantinedBy)
-	uploadsTotal.WithLabelValues("async").Inc()
+	s.respondUploaded(w, r, uploadEndpointAsync, mediaID, user, stored.length, quarantinedBy)
 }
 
 // --- shared ----------------------------------------------------------------
@@ -416,12 +441,13 @@ func (u *Uploader) maybeThumbnail(r *http.Request, mediaID, srcPath, mediaType s
 	go u.generateUploadThumbnails(mediaID, srcPath, mediaType)
 }
 
-func (s *Server) respondUploaded(w http.ResponseWriter, r *http.Request, mediaID, user string, length int64, quarantinedBy string) {
+func (s *Server) respondUploaded(w http.ResponseWriter, r *http.Request, endpoint, mediaID, user string, length int64, quarantinedBy string) {
 	setMedia(r.Context(), "", mediaID)
 	if quarantinedBy != "" {
 		annotate(r.Context(), func(rl *reqLog) { rl.reason = "hash_quarantined" })
 	}
 	setOutcome(r.Context(), outcomeUploaded)
+	uploadsTotal.WithLabelValues(endpoint, uploadResultStored).Inc()
 	uploadedBytes.Add(float64(length))
 	writeJSON(w, http.StatusOK, uploadResponse{
 		ContentURI: "mxc://" + s.cfg.ServerName + "/" + mediaID,
@@ -430,10 +456,10 @@ func (s *Server) respondUploaded(w http.ResponseWriter, r *http.Request, mediaID
 
 // uploadFailed answers a failed upload, preferring the spec's status where the
 // cause is known.
-func (s *Server) uploadFailed(w http.ResponseWriter, r *http.Request, err error, what string) {
+func (s *Server) uploadFailed(w http.ResponseWriter, r *http.Request, endpoint string, err error, what string) {
 	if errors.Is(err, errUploadTooLarge) {
 		setOutcome(r.Context(), outcomeTooLarge)
-		uploadsTotal.WithLabelValues("too_large").Inc()
+		uploadsTotal.WithLabelValues(endpoint, uploadResultTooLarge).Inc()
 		writeMatrixError(w, http.StatusRequestEntityTooLarge, "M_TOO_LARGE",
 			"Upload request body is too large")
 		return
@@ -442,12 +468,13 @@ func (s *Server) uploadFailed(w http.ResponseWriter, r *http.Request, err error,
 		// The client went away mid-body; nothing to answer.
 		return
 	}
-	uploadsTotal.WithLabelValues("failed").Inc()
+	uploadsTotal.WithLabelValues(endpoint, uploadResultFailed).Inc()
 	s.internalError(w, r, err, what)
 }
 
 func (s *Server) proxyUpload(w http.ResponseWriter, r *http.Request, reason string) {
 	proxiedTotal.WithLabelValues("upload", reason).Inc()
+	uploadsTotal.WithLabelValues(uploadEndpointFor(r), uploadResultProxied).Inc()
 	setProxied(r.Context(), reason)
 	if s.uploadUp != nil {
 		s.uploadUp.ServeHTTP(w, r)
@@ -580,4 +607,16 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// uploadEndpointFor labels a proxied request by which upload endpoint it was.
+func uploadEndpointFor(r *http.Request) string {
+	switch {
+	case r.Method == http.MethodPut:
+		return uploadEndpointAsync
+	case strings.HasSuffix(r.URL.Path, "/create"):
+		return uploadEndpointCreate
+	default:
+		return uploadEndpointSync
+	}
 }

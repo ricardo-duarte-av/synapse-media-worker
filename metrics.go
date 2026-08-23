@@ -75,15 +75,24 @@ var (
 		Help: "Generated remote thumbnails written into Synapse's media store, by result.",
 	}, []string{"result"})
 
-	// uploadsTotal counts media accepted from local users, by result.
+	// uploadsTotal counts upload requests by which endpoint served them and
+	// how they ended. The two are separate dimensions: "async" is an endpoint,
+	// not an outcome.
 	uploadsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "synapse_media_worker_uploads_total",
-		Help: "Media uploads handled by the worker, by result.",
-	}, []string{"result"})
+		Help: "Upload requests handled by the worker, by endpoint and result.",
+	}, []string{"endpoint", "result"})
 
 	uploadedBytes = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "synapse_media_worker_uploaded_bytes_total",
-		Help: "Bytes accepted from local users.",
+		Help: "Bytes accepted from local users and written to the media store.",
+	})
+
+	// pendingMediaReserved tracks async media IDs created but not yet
+	// uploaded to, which is what max_pending_media_uploads bounds.
+	pendingMediaReserved = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "synapse_media_worker_pending_media_reserved_total",
+		Help: "Async media IDs reserved by /_matrix/media/v1/create.",
 	})
 
 	tokenCacheSize = promauto.NewGauge(prometheus.GaugeOpts{

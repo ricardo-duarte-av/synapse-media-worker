@@ -60,6 +60,17 @@ worked. Persistently high means the pool is too small; an uneven split under
 least-connections usually means one worker is slow, not that balancing is
 broken.
 
+**Uploads by endpoint and result** keeps two dimensions apart deliberately.
+`sync`, `create` and `async` are endpoints; `stored`, `too_large`, `limited`,
+`forbidden`, `conflict`, `not_found`, `failed` and `proxied` are outcomes. Most
+of the refusals are spec-defined and routine at low rates, with two worth
+watching: a rising `limited` means some client is reserving async media IDs via
+`/create` and never uploading to them, which will lock it out for up to
+`unused_expiration_time`; and `failed` should be zero, since everything else has
+a defined status.
+
+`proxied` simply means `accept_uploads` is off and Synapse is handling them.
+
 **Response status**: 404 is routine for media. 401 means tokens are being
 rejected; 503 means Synapse could not be reached to validate one, which is a
 worker-to-Synapse problem rather than a client one.

@@ -257,3 +257,129 @@ func TestSynapseThumbnailType(t *testing.T) {
 		}
 	}
 }
+
+// Every terminal path in an upload handler must record a metric, or the
+// dashboard silently under-reports. This checks the labels are the ones the
+// dashboard queries, and that endpoint and result stay separate dimensions --
+// an earlier version used "async" as a result, mixing the two.
+func TestUploadMetricLabelsAreConsistent(t *testing.T) {
+	endpoints := map[string]bool{
+		uploadEndpointSync: true, uploadEndpointCreate: true, uploadEndpointAsync: true,
+	}
+	results := map[string]bool{
+		uploadResultStored: true, uploadResultReserved: true, uploadResultTooLarge: true,
+		uploadResultLimited: true, uploadResultForbidden: true, uploadResultNotFound: true,
+		uploadResultConflict: true, uploadResultFailed: true, uploadResultProxied: true,
+	}
+
+	src, err := os.ReadFile("upload.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := findLabelCalls(string(src), "uploadsTotal.WithLabelValues(")
+	if len(calls) < 8 {
+		t.Fatalf("only %d uploadsTotal call sites; terminal paths are probably unrecorded", len(calls))
+	}
+	for _, args := range calls {
+		if len(args) != 2 {
+			t.Errorf("uploadsTotal call has %d labels, want endpoint and result: %v", len(args), args)
+			continue
+		}
+		ep, res := args[0], args[1]
+		// "endpoint" is the parameter the shared responders take; anything
+		// else must be one of the constants.
+		if ep != "endpoint" && ep != "uploadEndpointFor(r)" && !endpoints[constValue(ep)] {
+			t.Errorf("unknown endpoint label %q", ep)
+		}
+		if !results[constValue(res)] {
+			t.Errorf("unknown result label %q", res)
+		}
+	}
+}
+
+// findLabelCalls returns the top-level arguments of each call to prefix,
+// respecting nested parentheses.
+func findLabelCalls(src, prefix string) [][]string {
+	var out [][]string
+	for i := 0; ; {
+		j := strings.Index(src[i:], prefix)
+		if j < 0 {
+			return out
+		}
+		start := i + j + len(prefix)
+		depth, end := 0, -1
+		for k := start; k < len(src); k++ {
+			switch src[k] {
+			case '(':
+				depth++
+			case ')':
+				if depth == 0 {
+					end = k
+				} else {
+					depth--
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return out
+		}
+		var args []string
+		depth = 0
+		cur := strings.Builder{}
+		for _, c := range src[start:end] {
+			switch c {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			case ',':
+				if depth == 0 {
+					args = append(args, strings.TrimSpace(cur.String()))
+					cur.Reset()
+					continue
+				}
+			}
+			cur.WriteRune(c)
+		}
+		if strings.TrimSpace(cur.String()) != "" {
+			args = append(args, strings.TrimSpace(cur.String()))
+		}
+		out = append(out, args)
+		i = end
+	}
+}
+
+// constValue maps a constant identifier back to its value so the test compares
+// against the same strings the dashboard uses.
+func constValue(ident string) string {
+	switch ident {
+	case "uploadEndpointSync":
+		return uploadEndpointSync
+	case "uploadEndpointCreate":
+		return uploadEndpointCreate
+	case "uploadEndpointAsync":
+		return uploadEndpointAsync
+	case "uploadResultStored":
+		return uploadResultStored
+	case "uploadResultReserved":
+		return uploadResultReserved
+	case "uploadResultTooLarge":
+		return uploadResultTooLarge
+	case "uploadResultLimited":
+		return uploadResultLimited
+	case "uploadResultForbidden":
+		return uploadResultForbidden
+	case "uploadResultNotFound":
+		return uploadResultNotFound
+	case "uploadResultConflict":
+		return uploadResultConflict
+	case "uploadResultFailed":
+		return uploadResultFailed
+	case "uploadResultProxied":
+		return uploadResultProxied
+	}
+	return ident
+}

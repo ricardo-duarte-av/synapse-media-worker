@@ -67,6 +67,25 @@ media:
   # back to proxying exactly as before. Only remote_content/ and
   # remote_thumbnail/ are ever written; media this server owns stays untouchable
   # in code.
+  # Accept uploads from local users instead of proxying them to Synapse.
+  #
+  # This is the only feature that writes into local_content, so it widens the
+  # write guard; url_cache stays unwritable in every configuration. Off by
+  # default.
+  accept_uploads: false
+  max_concurrent_uploads: 8
+  # What to generate when media is uploaded: "none" (default) or "synapse" for
+  # byte-parity with Synapse's set.
+  #
+  # none is the better choice under dynamic_thumbnails, where Synapse's
+  # upload-time thumbnails are written in a type no request path can ask for,
+  # and where most uploads are never viewed at thumbnail size at all. Thumbnails
+  # are still generated on demand, which is what serves every request.
+  upload_thumbnails: none
+  # Derived from synapse_config when unset.
+  # max_pending_media_uploads: 5
+  # unused_expiration_time: 24h
+
   fetch_remote: false
   max_concurrent_fetches: 4
   # Write thumbnails generated for REMOTE media into Synapse's media store
@@ -117,6 +136,9 @@ upstream:
   thumbnail:
     sockets:
       - /var/sockets/nginx/av-media-worker-thumbnails.sock
+  # Where uploads go when accept_uploads is off. Falls back to `download`.
+  upload:
+    socket: /var/sockets/nginx/av-media-worker-uploads.sock
 
 log:
   level: info
