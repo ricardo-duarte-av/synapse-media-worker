@@ -54,6 +54,13 @@ func TestUploadStoresAtSynapsePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// store() leaves the bytes in a temp file; committing is explicit.
+	if _, err := os.Stat(got.path); !os.IsNotExist(err) {
+		t.Error("store() made the bytes visible at the final path before commit")
+	}
+	if err := got.commit(); err != nil {
+		t.Fatal(err)
+	}
 
 	want := filepath.Join(store, "local_content", "Ab", "Cd", "EfGhIjKlMnOpQrStUvWx")
 	if got.path != want {
@@ -382,4 +389,77 @@ func constValue(ident string) string {
 		return uploadResultProxied
 	}
 	return ident
+}
+
+// Two clients PUTting to the same reserved media ID share a destination path.
+// The loser must discard its own temp file and never touch that path -- an
+// earlier version renamed first and then removed the destination, which took
+// the winner's file with it and left a completed row pointing at nothing.
+func TestAsyncLoserNeverTouchesTheSharedPath(t *testing.T) {
+	store := t.TempDir()
+	u, _ := newTestUploader(t, store, 1<<20)
+	const mediaID = "AbCdEfGhIjKlMnOpQrStUvWx"
+
+	winner, err := u.store(uploadRequest([]byte("winner bytes"), "image/png", ""), mediaID, "image/png", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loser, err := u.store(uploadRequest([]byte("loser bytes!"), "image/png", ""), mediaID, "image/png", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner.path != loser.path {
+		t.Fatalf("expected a shared destination, got %q and %q", winner.path, loser.path)
+	}
+	if winner.tmpPath == loser.tmpPath {
+		t.Fatal("both writers used the same temp file")
+	}
+
+	// The winner commits; the loser discards.
+	if err := winner.commit(); err != nil {
+		t.Fatal(err)
+	}
+	loser.discard()
+
+	got, err := os.ReadFile(winner.path)
+	if err != nil {
+		t.Fatalf("the winner's file is gone: %v", err)
+	}
+	if string(got) != "winner bytes" {
+		t.Errorf("file contains %q, want the winner's bytes", got)
+	}
+	// And no temp files survive.
+	entries, _ := os.ReadDir(filepath.Dir(winner.path))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".incoming-") {
+			t.Errorf("temporary file left behind: %s", e.Name())
+		}
+	}
+}
+
+// Discarding must be safe to call twice and must not touch the final path.
+func TestDiscardIsIdempotent(t *testing.T) {
+	store := t.TempDir()
+	u, _ := newTestUploader(t, store, 1<<20)
+	const mediaID = "AbCdEfGhIjKlMnOpQrStUvWx"
+
+	committed, err := u.store(uploadRequest([]byte("kept"), "image/png", ""), mediaID, "image/png", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := committed.commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := u.store(uploadRequest([]byte("gone"), "image/png", ""), mediaID, "image/png", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.discard()
+	other.discard() // must not panic, must not remove the committed file
+
+	got, err := os.ReadFile(committed.path)
+	if err != nil || string(got) != "kept" {
+		t.Errorf("committed file damaged by discard: %q %v", got, err)
+	}
 }

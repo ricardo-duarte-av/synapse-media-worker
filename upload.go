@@ -113,8 +113,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	quarantinedBy, err := s.uploader.quarantineFor(r.Context(), stored.sha256)
 	if err != nil {
-		_ = os.Remove(stored.path)
+		stored.discard()
 		s.uploadFailed(w, r, uploadEndpointSync, err, "checking quarantined hashes")
+		return
+	}
+	// Nobody else can hold this media ID, so the file may land before the row.
+	if err := stored.commit(); err != nil {
+		s.uploadFailed(w, r, uploadEndpointSync, err, "installing upload")
 		return
 	}
 
@@ -250,7 +255,7 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	quarantinedBy, err := s.uploader.quarantineFor(r.Context(), stored.sha256)
 	if err != nil {
-		_ = os.Remove(stored.path)
+		stored.discard()
 		s.uploadFailed(w, r, uploadEndpointAsync, err, "checking quarantined hashes")
 		return
 	}
@@ -261,17 +266,24 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 	won, err := s.db.CompleteLocalMedia(r.Context(), mediaID, mediaType, uploadName,
 		stored.length, stored.sha256, quarantinedBy)
 	if err != nil {
-		_ = os.Remove(stored.path)
+		stored.discard()
 		s.uploadFailed(w, r, uploadEndpointAsync, err, "completing upload")
 		return
 	}
 	if !won {
-		// Someone completed it between our check and our write. Their bytes
-		// are the ones the row describes, so ours must go.
-		_ = os.Remove(stored.path)
+		// Someone completed it first. Their bytes are what the row describes,
+		// so ours are discarded without ever reaching the shared path.
+		stored.discard()
 		uploadsTotal.WithLabelValues(uploadEndpointAsync, uploadResultConflict).Inc()
 		writeMatrixError(w, http.StatusConflict, "M_CANNOT_OVERWRITE_MEDIA",
 			"Media ID already has content")
+		return
+	}
+	// We own the row now, so our bytes are the ones that may land.
+	if err := stored.commit(); err != nil {
+		s.log.Error().Err(err).Str("media_id", mediaID).
+			Msg("Completed the row but could not install the file; media will 404")
+		s.uploadFailed(w, r, uploadEndpointAsync, err, "installing upload")
 		return
 	}
 
@@ -347,11 +359,40 @@ func (s *Server) uploadMetadata(w http.ResponseWriter, r *http.Request) (mediaTy
 	return mediaType, uploadName, length, true
 }
 
-// storedUpload describes bytes that have been written to their final path.
+// storedUpload describes bytes written to a temporary file, not yet visible at
+// their final path.
+//
+// Committing is explicit because the two upload paths need opposite orders.
+// A synchronous upload owns a media ID nobody else can have, so it commits
+// immediately and the row follows. An asynchronous upload shares its media ID
+// -- and therefore its destination path -- with any other client PUTting to the
+// same reserved ID, so it must win the row first and only then let its bytes
+// land. Committing before that let a loser's rename overwrite the winner's
+// file, and its cleanup then delete it, leaving a completed row with no file:
+// the 404 loop that never self-heals.
 type storedUpload struct {
-	path   string
-	length int64
-	sha256 string
+	path    string
+	tmpPath string
+	length  int64
+	sha256  string
+}
+
+// commit makes the bytes visible at their final path.
+func (s *storedUpload) commit() error {
+	if err := os.Rename(s.tmpPath, s.path); err != nil {
+		_ = os.Remove(s.tmpPath)
+		return fmt.Errorf("installing upload: %w", err)
+	}
+	s.tmpPath = ""
+	return nil
+}
+
+// discard throws the bytes away without ever touching the final path.
+func (s *storedUpload) discard() {
+	if s.tmpPath != "" {
+		_ = os.Remove(s.tmpPath)
+		s.tmpPath = ""
+	}
 }
 
 // store streams the request body into the media store, hashing as it goes.
@@ -414,12 +455,11 @@ func (u *Uploader) store(r *http.Request, mediaID, mediaType string, declared in
 		_ = os.Remove(tmpName)
 		return nil, fmt.Errorf("setting upload permissions: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return nil, fmt.Errorf("installing upload: %w", err)
-	}
 
-	return &storedUpload{path: path, length: written, sha256: hex.EncodeToString(hasher.Sum(nil))}, nil
+	return &storedUpload{
+		path: path, tmpPath: tmpName,
+		length: written, sha256: hex.EncodeToString(hasher.Sum(nil)),
+	}, nil
 }
 
 // errUploadTooLarge marks a body that exceeded the limit while being read.
