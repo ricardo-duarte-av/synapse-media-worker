@@ -366,3 +366,39 @@ func (d *DB) StoreRemoteMedia(ctx context.Context, m *RemoteMedia, sha256hex str
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+// storeRemoteThumbnailQuery mirrors Synapse's store_remote_media_thumbnail
+// (synapse/storage/databases/main/media_repository.py:863), which is a
+// simple_upsert with thumbnail_length in `values` and filesystem_id in
+// `insertion_values`.
+//
+// That distinction matters: on conflict Synapse updates only the length and
+// leaves filesystem_id alone. The thumbnail file is looked up under
+// remote_media_cache.filesystem_id, so a row pointing somewhere else would send
+// Synapse to a path that does not exist, and it would never correct itself.
+//
+// The conflict target is the real unique index, whose column order puts
+// thumbnail_type before thumbnail_method.
+const storeRemoteThumbnailQuery = `
+INSERT INTO remote_media_cache_thumbnails (
+    media_origin, media_id, thumbnail_width, thumbnail_height,
+    thumbnail_type, thumbnail_method, thumbnail_length, filesystem_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (media_origin, media_id, thumbnail_width, thumbnail_height,
+             thumbnail_type, thumbnail_method)
+DO UPDATE SET thumbnail_length = EXCLUDED.thumbnail_length`
+
+// StoreRemoteThumbnail records a thumbnail the worker generated for remote
+// media, so Synapse can serve it too.
+//
+// length must be the size of the file actually on disk, not of the buffer that
+// produced it: Synapse sends this value as the Content-Length when it serves
+// the thumbnail, so a row that disagrees with the file truncates the response.
+func (d *DB) StoreRemoteThumbnail(ctx context.Context, origin, mediaID, filesystemID string, t ThumbnailRow) error {
+	_, err := d.pool.Exec(ctx, storeRemoteThumbnailQuery,
+		origin, mediaID, t.Width, t.Height, t.Type, t.Method, t.Length, filesystemID)
+	if err != nil {
+		return fmt.Errorf("storing remote thumbnail: %w", err)
+	}
+	return nil
+}

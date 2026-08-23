@@ -301,7 +301,7 @@ func (s *Server) serveLocalThumbnail(w http.ResponseWriter, r *http.Request, med
 		respondNotFound(w, r.URL.Path)
 		return
 	}
-	s.serveGeneratedThumbnail(w, r, "", mediaID, srcPath, media.MediaType, req, federation)
+	s.serveGeneratedThumbnail(w, r, "", mediaID, "", srcPath, media.MediaType, req, federation)
 	s.db.MarkRecentlyAccessedLocal(mediaID)
 }
 
@@ -362,13 +362,13 @@ func (s *Server) serveRemoteThumbnail(w http.ResponseWriter, r *http.Request, se
 		s.proxyThumbnail(w, r, "remote_path_invalid")
 		return
 	}
-	s.serveGeneratedThumbnail(w, r, serverName, mediaID, srcPath, media.MediaType, req, false)
+	s.serveGeneratedThumbnail(w, r, serverName, mediaID, media.FilesystemID, srcPath, media.MediaType, req, false)
 	s.db.MarkRecentlyAccessedRemote(serverName, mediaID)
 }
 
 // serveGeneratedThumbnail serves from the worker's own cache, generating the
 // thumbnail first if necessary, and proxies to Synapse when it cannot.
-func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request, origin, mediaID, srcPath, sourceType string, req ThumbnailRequest, federation bool) {
+func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request, origin, mediaID, filesystemID, srcPath, sourceType string, req ThumbnailRequest, federation bool) {
 	key := cacheKey(origin, mediaID, req)
 
 	if f, ok := s.cache.Open(key); ok {
@@ -400,11 +400,7 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 			return nil, err
 		}
 		thumbnailGenerateDuration.Observe(time.Since(start).Seconds())
-		if err := s.cache.Put(key, out); err != nil {
-			// Being unable to cache is not a reason to fail the request.
-			s.log.Warn().Err(err).Str("media_id", mediaID).
-				Msg("Could not store generated thumbnail")
-		}
+		s.storeGeneratedThumbnail(r.Context(), origin, mediaID, filesystemID, key, req, out)
 		return out, nil
 	})
 	if err != nil {
@@ -425,6 +421,47 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 	thumbnailOutcome.WithLabelValues(outcomeGenerated).Inc()
 	setOutcome(r.Context(), outcomeGenerated)
 	s.respondThumbnailBytes(w, r, data.([]byte), req.Type, federation)
+}
+
+// storeGeneratedThumbnail persists a freshly generated thumbnail.
+//
+// For remote media with write-through enabled it goes into Synapse's media
+// store, where it is permanent and Synapse can serve it too. Everything else
+// goes into the worker's own cache. Either way a failure is logged and not
+// surfaced: the thumbnail has already been produced and the request can be
+// answered regardless.
+func (s *Server) storeGeneratedThumbnail(
+	ctx context.Context,
+	origin, mediaID, filesystemID, key string,
+	req ThumbnailRequest,
+	data []byte,
+) {
+	if s.writeThroughRemote(origin, filesystemID) {
+		if err := s.remote.WriteThroughRemoteThumbnail(ctx, origin, mediaID, filesystemID, req, data); err != nil {
+			thumbnailWriteThrough.WithLabelValues("failed").Inc()
+			s.log.Warn().Err(err).
+				Str("origin", origin).Str("media_id", mediaID).
+				Msg("Could not write thumbnail through to the media store, falling back to the worker cache")
+		} else {
+			thumbnailWriteThrough.WithLabelValues("stored").Inc()
+			return
+		}
+	}
+	if err := s.cache.Put(key, data); err != nil {
+		// Being unable to cache is not a reason to fail the request.
+		s.log.Warn().Err(err).Str("media_id", mediaID).
+			Msg("Could not store generated thumbnail")
+	}
+}
+
+// writeThroughRemote reports whether this thumbnail should be written into
+// Synapse's store. Local media is deliberately excluded: local_thumbnails/ is
+// not writable, so media this server owns cannot be touched.
+func (s *Server) writeThroughRemote(origin, filesystemID string) bool {
+	return s.cfg.Media.WriteThroughThumbnails &&
+		s.remote != nil &&
+		origin != "" &&
+		filesystemID != ""
 }
 
 // respondThumbnailFile writes a thumbnail that is backed by a file.

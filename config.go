@@ -84,6 +84,11 @@ type MediaConfig struct {
 	MaxConcurrentFetches int `yaml:"max_concurrent_fetches"`
 	// FetchTimeout bounds a single federated download.
 	FetchTimeout time.Duration `yaml:"fetch_timeout"`
+	// WriteThroughThumbnails writes thumbnails generated for REMOTE media into
+	// Synapse's media store instead of the worker's own cache, so they are
+	// permanent rather than LRU-evictable and Synapse can serve them too.
+	// Local media thumbnails are unaffected and stay in the worker's cache.
+	WriteThroughThumbnails bool `yaml:"write_through_thumbnails"`
 	// MaxUploadSize mirrors Synapse's max_upload_size and caps how large a
 	// remote file the worker will store.
 	MaxUploadSize int64 `yaml:"max_upload_size"`
@@ -271,6 +276,12 @@ func (c *Config) validate() error {
 	}
 	if c.Media.MaxImagePixels <= 0 {
 		return fmt.Errorf("media.max_image_pixels must be positive")
+	}
+	if c.Media.WriteThroughThumbnails && !c.Media.FetchRemote {
+		// Both need a writable store, and the startup probe is tied to
+		// fetch_remote. Rather than probe twice, require the flag that already
+		// declares the intent to write.
+		return fmt.Errorf("media.write_through_thumbnails requires media.fetch_remote to be enabled")
 	}
 	if c.Media.FetchRemote {
 		if c.Media.SigningKeyPath == "" {

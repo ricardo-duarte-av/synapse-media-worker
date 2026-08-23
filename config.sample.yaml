@@ -52,6 +52,11 @@ media:
   # in code.
   fetch_remote: false
   max_concurrent_fetches: 4
+  # Write thumbnails generated for REMOTE media into Synapse's media store
+  # rather than the worker's own cache, so they are permanent instead of
+  # LRU-evictable and Synapse can serve them too. Requires fetch_remote.
+  # Local media thumbnails are unaffected and stay in the worker's cache.
+  write_through_thumbnails: false
   fetch_timeout: 60s
   # Must match homeserver.yaml's max_upload_size. Caps how large a remote file
   # the worker will store.

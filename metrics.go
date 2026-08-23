@@ -68,6 +68,13 @@ var (
 		Help: "Remote media the worker fetched over federation, by result.",
 	}, []string{"result"})
 
+	// thumbnailWriteThrough tracks thumbnails written into Synapse's own store
+	// rather than the worker's cache.
+	thumbnailWriteThrough = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "synapse_media_worker_thumbnail_write_through_total",
+		Help: "Generated remote thumbnails written into Synapse's media store, by result.",
+	}, []string{"result"})
+
 	tokenCacheSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "synapse_media_worker_token_cache_entries",
 		Help: "Access token verdicts currently cached.",

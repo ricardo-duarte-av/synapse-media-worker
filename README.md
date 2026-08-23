@@ -153,12 +153,43 @@ invites the media to be deleted almost immediately.
   `image/png` at the requested dimensions — so they almost never match and are
   never served. Thumbnails stay on-demand. This does not cause Synapse to
   re-download: storing the original is what prevents that.
+  See `write_through_thumbnails` below for where they are kept.
 - **No per-IP byte ratelimiting** (`remote_media_download_per_second`).
   `max_upload_size` is enforced, which is what protects the disk.
 - **No `prevent_media_downloads_from` or `federation_domain_whitelist`.** If you
   rely on either, leave `fetch_remote` off until they are implemented.
 - **No spam-checker callbacks.** Synapse runs these post-download, pre-persist.
   If you have a media spam-checker module, this bypasses it.
+
+### `write_through_thumbnails`
+
+Requires `fetch_remote`. Off by default.
+
+Thumbnails the worker generates normally live in its own cache, which is
+LRU-evictable and invisible to Synapse. With this on, thumbnails for **remote**
+media are written into Synapse's media store instead — under the original's
+`filesystem_id`, with a row in `remote_media_cache_thumbnails` — so they are
+permanent, the existing exact-match lookup finds them next time, and Synapse can
+serve them too.
+
+Synapse persists dynamically generated thumbnails the same way: a size a client
+asks for once becomes a permanent row at the **requested** dimensions, not the
+post-aspect ones. This makes the worker behave identically instead of keeping a
+second, weaker copy.
+
+Local media is deliberately excluded. `local_thumbnails/` stays unwritable, so
+nothing the worker does can touch media this server owns.
+
+Two details that matter:
+
+- The row's `filesystem_id` must equal `remote_media_cache.filesystem_id`, since
+  that is where Synapse looks for the file. The upsert therefore updates only
+  `thumbnail_length` and never `filesystem_id`, matching Synapse's
+  `insertion_values` semantics.
+- `thumbnail_length` is taken from the file on disk after the rename, not from
+  the buffer that produced it. Synapse sends that value as the `Content-Length`
+  when it serves the thumbnail, so a row disagreeing with the file would
+  truncate the response.
 
 ## Concurrency
 

@@ -179,3 +179,76 @@ func (rf *RemoteFetcher) download(ctx context.Context, origin, mediaID, finalPat
 	}
 	return info, tmpName, nil
 }
+
+// WriteThroughRemoteThumbnail stores a thumbnail the worker generated for
+// remote media into Synapse's media store, rather than the worker's own cache.
+//
+// The point is that Synapse's copy is permanent and shared: the worker's cache
+// is LRU-evictable and invisible to Synapse, so the same thumbnail could end up
+// generated twice and stored twice. Written here, the existing exact-match
+// lookup finds it on the next request and Synapse can serve it as well.
+//
+// Only remote thumbnails go through this path. local_thumbnails/ stays
+// unwritable, so nothing here can touch media this server owns.
+func (rf *RemoteFetcher) WriteThroughRemoteThumbnail(
+	ctx context.Context,
+	origin, mediaID, filesystemID string,
+	req ThumbnailRequest,
+	data []byte,
+) error {
+	path, err := rf.paths.RemoteThumbnail(origin, filesystemID, req.Width, req.Height, req.Type, req.Method)
+	if err != nil {
+		return fmt.Errorf("building thumbnail path: %w", err)
+	}
+	if err := rf.paths.WritablePath(path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating thumbnail directory: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".thumb-*")
+	if err != nil {
+		return fmt.Errorf("creating temporary thumbnail: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing thumbnail: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing thumbnail: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("closing thumbnail: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("setting thumbnail permissions: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("installing thumbnail: %w", err)
+	}
+
+	// Take the length from the file rather than the buffer. Synapse sends the
+	// row's thumbnail_length as the Content-Length when it serves this
+	// thumbnail, so if another writer won the rename the row must describe
+	// whatever is actually there, not what we produced.
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat after installing thumbnail: %w", err)
+	}
+
+	return rf.db.StoreRemoteThumbnail(ctx, origin, mediaID, filesystemID, ThumbnailRow{
+		Width:  req.Width,
+		Height: req.Height,
+		Type:   req.Type,
+		Method: req.Method,
+		Length: info.Size(),
+	})
+}
