@@ -136,3 +136,27 @@ func TestLogRequestsDefaultsOn(t *testing.T) {
 		t.Error("requests: false should disable it")
 	}
 }
+
+// The healthcheck polls every ten seconds and the metrics scrape as often.
+// Logging them buries the requests that matter.
+func TestOperationalPathsAreNotLogged(t *testing.T) {
+	for _, path := range []string{"/health", "/metrics"} {
+		var buf strings.Builder
+		h := withRequestLog(zerolog.New(&buf), true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", path, nil))
+		if buf.Len() != 0 {
+			t.Errorf("%s was logged: %q", path, buf.String())
+		}
+	}
+	// A media request must still be logged.
+	var buf strings.Builder
+	h := withRequestLog(zerolog.New(&buf), true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/_matrix/client/v1/media/download/e/a", nil))
+	if buf.Len() == 0 {
+		t.Error("a media request was not logged")
+	}
+}

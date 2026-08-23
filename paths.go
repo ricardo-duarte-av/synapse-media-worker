@@ -24,6 +24,8 @@ var newFormatIDRe = regexp.MustCompile(`^\d\d\d\d-\d\d-\d\d`)
 // MediaPaths builds absolute paths inside Synapse's media store.
 type MediaPaths struct {
 	base string
+	// uploadsAllowed widens the write guard to cover media this server owns.
+	uploadsAllowed bool
 }
 
 func NewMediaPaths(base string) *MediaPaths {
@@ -235,15 +237,36 @@ func (p *MediaPaths) URLCacheThumbnail(mediaID string, width, height int, conten
 
 // --- write paths -----------------------------------------------------------
 
-// writablePrefixes are the only directories the worker may write into.
+// writablePrefixes are the directories the worker may write into.
 //
 // v0.1 could not write to the media store at all, and the read-only mount was
-// the guarantee. Fetching remote media requires giving that up, so the
-// guarantee is narrowed rather than dropped: media this server owns
-// (local_content, local_thumbnails) and the URL preview cache stay unwritable
-// in code, and only the remote cache -- which Synapse itself treats as
-// disposable and re-fetchable -- can be touched.
-var writablePrefixes = []string{"remote_content", "remote_thumbnail"}
+// the guarantee. Each feature that needs to write widens this a little rather
+// than dropping it:
+//
+//   - remote_content and remote_thumbnail: the remote cache, which Synapse
+//     itself treats as disposable and re-fetchable.
+//   - local_content and local_thumbnails: media this server owns, writable
+//     only when accept_uploads is on.
+//
+// url_cache and url_cache_thumbnails are never writable, in any configuration,
+// because the worker does not handle URL previews.
+var (
+	remoteWritablePrefixes = []string{"remote_content", "remote_thumbnail"}
+	uploadWritablePrefixes = []string{"local_content", "local_thumbnails"}
+)
+
+// AllowUploadWrites permits writes into local_content and local_thumbnails.
+// It is called only when accept_uploads is enabled.
+func (p *MediaPaths) AllowUploadWrites() {
+	p.uploadsAllowed = true
+}
+
+func (p *MediaPaths) writablePrefixes() []string {
+	if p.uploadsAllowed {
+		return append(append([]string{}, remoteWritablePrefixes...), uploadWritablePrefixes...)
+	}
+	return remoteWritablePrefixes
+}
 
 // WritablePath validates that a path produced by this package may be written
 // to. Every write must go through it.
@@ -257,9 +280,10 @@ func (p *MediaPaths) WritablePath(path string) error {
 		return fmt.Errorf("path %q is not relative to the media store: %w", path, err)
 	}
 	top, _, _ := strings.Cut(rel, string(filepath.Separator))
-	if slices.Contains(writablePrefixes, top) {
+	allowed := p.writablePrefixes()
+	if slices.Contains(allowed, top) {
 		return nil
 	}
 	return fmt.Errorf("refusing to write to %q: only %s may be written",
-		rel, strings.Join(writablePrefixes, " and "))
+		rel, strings.Join(allowed, ", "))
 }

@@ -29,6 +29,10 @@ const (
 	outcomeWorkerCache  = "worker_cache"  // a thumbnail this worker generated earlier
 	outcomeGenerated    = "generated"     // generated during this request
 	outcomeFetched      = "fetched"       // downloaded from the origin server just now
+	outcomeUploaded     = "uploaded"      // accepted from a local user and stored
+	outcomeReserved     = "reserved"      // an async media ID was created
+	outcomeLimited      = "rate_limited"  // refused, too many pending uploads
+	outcomeTooLarge     = "too_large"     // refused, over max_upload_size
 	outcomeProxied      = "proxied"       // handed back to Synapse
 	outcomeNotFound     = "not_found"
 	outcomeUnauthorized = "unauthorized"
@@ -97,7 +101,7 @@ func clientIP(r *http.Request) string {
 // withRequestLog logs one line per request once the response is complete.
 func withRequestLog(log zerolog.Logger, enabled bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !enabled {
+		if !enabled || isOperationalPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -150,6 +154,14 @@ func withRequestLog(log zerolog.Logger, enabled bool, next http.Handler) http.Ha
 		}
 		event.Msg("Request")
 	})
+}
+
+// isOperationalPath reports whether a path is infrastructure rather than a
+// media request. The compose healthcheck polls /health every ten seconds and a
+// scrape hits /metrics as often; logging those buries the requests that carry
+// something worth reading.
+func isOperationalPath(path string) bool {
+	return path == "/health" || path == "/metrics"
 }
 
 // mxcLabel renders the media as an mxc URI so log lines can be grepped with

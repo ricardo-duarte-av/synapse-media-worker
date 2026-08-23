@@ -26,6 +26,7 @@ type LocalMedia struct {
 	URLCache      string
 	Authenticated bool
 	CreatedTS     int64
+	UserID        string
 }
 
 // Quarantined reports whether the media has been quarantined by an admin.
@@ -131,7 +132,8 @@ func (d *DB) Close() {
 
 const localMediaQuery = `
 SELECT media_type, media_length, upload_name, quarantined_by, url_cache,
-       COALESCE(authenticated, false), COALESCE(created_ts, 0)
+       COALESCE(authenticated, false), COALESCE(created_ts, 0),
+       COALESCE(user_id, '')
   FROM local_media_repository
  WHERE media_id = $1`
 
@@ -140,7 +142,7 @@ func (d *DB) GetLocalMedia(ctx context.Context, mediaID string) (*LocalMedia, er
 	var mediaType, uploadName, quarantinedBy, urlCache *string
 	err := d.pool.QueryRow(ctx, localMediaQuery, mediaID).Scan(
 		&mediaType, &m.Length, &uploadName, &quarantinedBy, &urlCache,
-		&m.Authenticated, &m.CreatedTS,
+		&m.Authenticated, &m.CreatedTS, &m.UserID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -399,6 +401,150 @@ func (d *DB) StoreRemoteThumbnail(ctx context.Context, origin, mediaID, filesyst
 		origin, mediaID, t.Width, t.Height, t.Type, t.Method, t.Length, filesystemID)
 	if err != nil {
 		return fmt.Errorf("storing remote thumbnail: %w", err)
+	}
+	return nil
+}
+
+// --- writes for uploaded local media ---------------------------------------
+
+// storeLocalMediaQuery mirrors Synapse's store_local_media
+// (synapse/storage/databases/main/media_repository.py), column for column.
+// Synapse uses a plain INSERT; the unique constraint on media_id makes a
+// collision an error rather than an overwrite, which is what we want too.
+const storeLocalMediaQuery = `
+INSERT INTO local_media_repository (
+    media_id, media_type, created_ts, upload_name, media_length,
+    user_id, url_cache, authenticated, sha256, quarantined_by
+) VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9)`
+
+// StoreLocalMedia inserts a row for a completed synchronous upload.
+func (d *DB) StoreLocalMedia(ctx context.Context, m *LocalMedia, sha256hex string, authenticated bool, quarantinedBy string) error {
+	length := int64(0)
+	if m.Length != nil {
+		length = *m.Length
+	}
+	_, err := d.pool.Exec(ctx, storeLocalMediaQuery,
+		m.MediaID, m.MediaType, m.CreatedTS, nullableString(m.UploadName), length,
+		m.UserID, authenticated, nullableString(sha256hex), nullableString(quarantinedBy))
+	if err != nil {
+		return fmt.Errorf("storing local media: %w", err)
+	}
+	return nil
+}
+
+// storeLocalMediaIDQuery mirrors store_local_media_id: the four columns
+// /_matrix/media/v1/create populates, leaving media_length NULL to mark the
+// media as pending.
+const storeLocalMediaIDQuery = `
+INSERT INTO local_media_repository (media_id, created_ts, user_id, authenticated)
+VALUES ($1, $2, $3, $4)`
+
+// StoreLocalMediaID reserves a media ID for an asynchronous upload.
+func (d *DB) StoreLocalMediaID(ctx context.Context, mediaID string, createdTS int64, userID string, authenticated bool) error {
+	_, err := d.pool.Exec(ctx, storeLocalMediaIDQuery, mediaID, createdTS, userID, authenticated)
+	if err != nil {
+		return fmt.Errorf("reserving media id: %w", err)
+	}
+	return nil
+}
+
+// completeLocalMediaQuery finishes an asynchronous upload.
+//
+// Synapse's equivalent UPDATE is unconditional on media_id, which is why it has
+// to hold a cross-worker lock across the whole upload to stop two PUTs both
+// completing the same media. Adding `AND media_length IS NULL` gets the same
+// guarantee from the database: the second writer affects zero rows and is told
+// 409, with no lock table, renewal or timeout to get wrong.
+const completeLocalMediaQuery = `
+UPDATE local_media_repository
+   SET media_type = $2, upload_name = $3, media_length = $4, sha256 = $5,
+       quarantined_by = COALESCE($6, quarantined_by)
+ WHERE media_id = $1 AND media_length IS NULL`
+
+// CompleteLocalMedia finishes an asynchronous upload, reporting whether this
+// caller was the one that completed it. False means another writer got there
+// first and the caller must answer 409.
+func (d *DB) CompleteLocalMedia(ctx context.Context, mediaID, mediaType, uploadName string, length int64, sha256hex, quarantinedBy string) (bool, error) {
+	tag, err := d.pool.Exec(ctx, completeLocalMediaQuery,
+		mediaID, mediaType, nullableString(uploadName), length,
+		nullableString(sha256hex), nullableString(quarantinedBy))
+	if err != nil {
+		return false, fmt.Errorf("completing local media: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// countPendingMediaQuery is the query Synapse runs to enforce
+// max_pending_media_uploads, and the basis for the spec's 429 on /create.
+const countPendingMediaQuery = `
+SELECT COUNT(*), COALESCE(MIN(created_ts), 0)
+  FROM local_media_repository
+ WHERE user_id = $1 AND created_ts > $2 AND media_length IS NULL`
+
+// CountPendingMedia returns how many un-uploaded media IDs a user holds that
+// have not yet expired, and when the oldest of them expires.
+func (d *DB) CountPendingMedia(ctx context.Context, userID string, notBefore int64) (int, int64, error) {
+	var count int
+	var oldest int64
+	err := d.pool.QueryRow(ctx, countPendingMediaQuery, userID, notBefore).Scan(&count, &oldest)
+	if err != nil {
+		return 0, 0, fmt.Errorf("counting pending media: %w", err)
+	}
+	return count, oldest, nil
+}
+
+// isHashQuarantinedQuery mirrors get_is_hash_quarantined: media is quarantined
+// by content hash across both the local and remote tables together.
+const isHashQuarantinedQuery = `
+SELECT 1 FROM local_media_repository WHERE sha256 = $1 AND quarantined_by IS NOT NULL
+UNION ALL
+SELECT 1 FROM remote_media_cache   WHERE sha256 = $1 AND quarantined_by IS NOT NULL
+LIMIT 1`
+
+// IsHashQuarantined reports whether this content has already been quarantined
+// under some other media ID.
+//
+// Synapse applies this on upload only, and when it matches it stores the media
+// anyway with quarantined_by = 'system' and answers the uploader with a normal
+// 200. Skipping it would make the worker a way to re-upload quarantined
+// content.
+func (d *DB) IsHashQuarantined(ctx context.Context, sha256hex string) (bool, error) {
+	if sha256hex == "" {
+		return false, nil
+	}
+	var one int
+	err := d.pool.QueryRow(ctx, isHashQuarantinedQuery, sha256hex).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("checking quarantined hashes: %w", err)
+	}
+	return true, nil
+}
+
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// storeLocalThumbnailQuery mirrors store_local_thumbnail, an upsert keyed on
+// the five identifying columns.
+const storeLocalThumbnailQuery = `
+INSERT INTO local_media_repository_thumbnails (
+    media_id, thumbnail_width, thumbnail_height, thumbnail_type,
+    thumbnail_method, thumbnail_length
+) VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (media_id, thumbnail_width, thumbnail_height, thumbnail_type, thumbnail_method)
+DO UPDATE SET thumbnail_length = EXCLUDED.thumbnail_length`
+
+// StoreLocalThumbnail records a thumbnail for local media.
+func (d *DB) StoreLocalThumbnail(ctx context.Context, mediaID string, t ThumbnailRow) error {
+	_, err := d.pool.Exec(ctx, storeLocalThumbnailQuery,
+		mediaID, t.Width, t.Height, t.Type, t.Method, t.Length)
+	if err != nil {
+		return fmt.Errorf("storing local thumbnail: %w", err)
 	}
 	return nil
 }

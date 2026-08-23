@@ -75,6 +75,17 @@ var (
 		Help: "Generated remote thumbnails written into Synapse's media store, by result.",
 	}, []string{"result"})
 
+	// uploadsTotal counts media accepted from local users, by result.
+	uploadsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "synapse_media_worker_uploads_total",
+		Help: "Media uploads handled by the worker, by result.",
+	}, []string{"result"})
+
+	uploadedBytes = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "synapse_media_worker_uploaded_bytes_total",
+		Help: "Bytes accepted from local users.",
+	})
+
 	tokenCacheSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "synapse_media_worker_token_cache_entries",
 		Help: "Access token verdicts currently cached.",

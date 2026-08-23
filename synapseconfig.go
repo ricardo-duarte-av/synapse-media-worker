@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,6 +35,10 @@ type SynapseConfig struct {
 	// These accept either an integer or a suffixed string such as "100M".
 	MaxUploadSize  any `yaml:"max_upload_size"`
 	MaxImagePixels any `yaml:"max_image_pixels"`
+
+	MaxPendingMediaUploads *int  `yaml:"max_pending_media_uploads"`
+	UnusedExpirationTime   any   `yaml:"unused_expiration_time"`
+	MediaUploadLimits      []any `yaml:"media_upload_limits"`
 
 	DynamicThumbnails        *bool `yaml:"dynamic_thumbnails"`
 	EnableAuthenticatedMedia *bool `yaml:"enable_authenticated_media"`
@@ -152,4 +157,50 @@ func (s *SynapseConfig) DatabaseURI() (string, bool) {
 	}
 	u.RawQuery = q.Encode()
 	return u.String(), true
+}
+
+// parseSynapseDuration reproduces Synapse's Config.parse_duration
+// (synapse/config/_base.py:204). A bare integer is milliseconds; the suffixes
+// are s, m, h, d, w, y.
+func parseSynapseDuration(value any) (time.Duration, error) {
+	switch v := value.(type) {
+	case nil:
+		return 0, fmt.Errorf("no value")
+	case int:
+		return time.Duration(v) * time.Millisecond, nil
+	case int64:
+		return time.Duration(v) * time.Millisecond, nil
+	case float64:
+		return time.Duration(int64(v)) * time.Millisecond, nil
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, fmt.Errorf("empty value")
+		}
+		unit := time.Millisecond
+		switch s[len(s)-1] {
+		case 's':
+			unit = time.Second
+		case 'm':
+			unit = time.Minute
+		case 'h':
+			unit = time.Hour
+		case 'd':
+			unit = 24 * time.Hour
+		case 'w':
+			unit = 7 * 24 * time.Hour
+		case 'y':
+			unit = 365 * 24 * time.Hour
+		}
+		if unit != time.Millisecond {
+			s = s[:len(s)-1]
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%q is not a duration", v)
+		}
+		return time.Duration(n) * unit, nil
+	default:
+		return 0, fmt.Errorf("%v is not a duration", value)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,29 @@ func NewTokenAuthenticator(cfg AuthConfig) (*TokenAuthenticator, error) {
 	}, nil
 }
 
+// Credentials are what the worker presents to Synapse to identify the caller.
+//
+// UserID and DeviceID matter for appservice tokens: Synapse resolves those
+// first, and a `?user_id=` query parameter masquerades as a ghost in the
+// appservice's namespace. Everything downstream -- the user_id column, upload
+// ownership -- must use the masqueraded user, not the appservice's own.
+type Credentials struct {
+	Token    string
+	UserID   string
+	DeviceID string
+}
+
+// ExtractCredentials pulls the caller's token and any masquerade parameters
+// from the request.
+func ExtractCredentials(r *http.Request) Credentials {
+	q := r.URL.Query()
+	return Credentials{
+		Token:    ExtractToken(r),
+		UserID:   q.Get("user_id"),
+		DeviceID: q.Get("device_id"),
+	}
+}
+
 // ExtractToken pulls the access token from the request, accepting both the
 // Authorization header and the legacy query parameter.
 func ExtractToken(r *http.Request) string {
@@ -101,11 +125,19 @@ func ExtractToken(r *http.Request) string {
 	return r.URL.Query().Get("access_token")
 }
 
-// hashToken keys the cache without holding raw credentials in memory longer
-// than the request that carried them.
-func hashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// cacheKey keys the cache without holding raw credentials in memory longer than
+// the request that carried them.
+//
+// The masquerade parameters are part of the key. Keying on the token alone
+// would let one appservice ghost's verdict be served for another, since a
+// single appservice token resolves to a different user for every `?user_id=`.
+func (c Credentials) cacheKey() string {
+	h := sha256.New()
+	for _, part := range []string{c.Token, c.UserID, c.DeviceID} {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 type whoamiResponse struct {
@@ -117,10 +149,21 @@ type whoamiResponse struct {
 // the answer is unknown (Synapse unreachable), which callers should surface as
 // 503 rather than 401.
 func (a *TokenAuthenticator) Authenticate(ctx context.Context, token string) (tokenVerdict, error) {
-	if token == "" {
+	return a.AuthenticateAs(ctx, Credentials{Token: token})
+}
+
+// AuthenticateAs validates a caller, resolving appservice masquerading by
+// asking Synapse rather than trusting the request.
+//
+// The `?user_id=` parameter is forwarded to whoami so that Synapse performs the
+// namespace and registration checks and hands back the effective user. Trusting
+// a caller-supplied user_id here without that round trip would let an
+// appservice token write media as any local user.
+func (a *TokenAuthenticator) AuthenticateAs(ctx context.Context, creds Credentials) (tokenVerdict, error) {
+	if creds.Token == "" {
 		return tokenVerdict{valid: false}, nil
 	}
-	key := hashToken(token)
+	key := creds.cacheKey()
 	if v, ok := a.lookup(key); ok {
 		return v, nil
 	}
@@ -131,7 +174,7 @@ func (a *TokenAuthenticator) Authenticate(ctx context.Context, token string) (to
 		if v, ok := a.lookup(key); ok {
 			return v, nil
 		}
-		v, err := a.callWhoami(ctx, token)
+		v, err := a.callWhoami(ctx, creds)
 		if err != nil {
 			return tokenVerdict{}, err
 		}
@@ -144,12 +187,25 @@ func (a *TokenAuthenticator) Authenticate(ctx context.Context, token string) (to
 	return res.(tokenVerdict), nil
 }
 
-func (a *TokenAuthenticator) callWhoami(ctx context.Context, token string) (tokenVerdict, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.whoamiURL, nil)
+func (a *TokenAuthenticator) callWhoami(ctx context.Context, creds Credentials) (tokenVerdict, error) {
+	target := a.whoamiURL
+	// Forwarding these makes Synapse run its appservice namespace checks and
+	// return the effective user, rather than the appservice's own.
+	if creds.UserID != "" || creds.DeviceID != "" {
+		q := url.Values{}
+		if creds.UserID != "" {
+			q.Set("user_id", creds.UserID)
+		}
+		if creds.DeviceID != "" {
+			q.Set("device_id", creds.DeviceID)
+		}
+		target += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return tokenVerdict{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+creds.Token)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return tokenVerdict{}, fmt.Errorf("whoami request failed: %w", err)

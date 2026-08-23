@@ -34,7 +34,12 @@ type Server struct {
 	// remote fetches uncached remote media itself. Nil when fetch_remote is
 	// off, in which case those requests are proxied to Synapse as before.
 	remote *RemoteFetcher
-	log    zerolog.Logger
+	// uploader accepts media from local users. Nil when accept_uploads is off,
+	// in which case uploads are proxied to Synapse.
+	uploader *Uploader
+	// uploadUp is the Synapse upload worker to proxy to.
+	uploadUp *Proxy
+	log      zerolog.Logger
 
 	// generating collapses concurrent generation of the same thumbnail, so a
 	// popular image is decoded once rather than once per waiting request.

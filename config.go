@@ -88,6 +88,25 @@ type MediaConfig struct {
 	// an unbounded burst of distinct sizes could exhaust both. Defaults to the
 	// number of usable CPUs.
 	MaxConcurrentThumbnails int `yaml:"max_concurrent_thumbnails"`
+	// AcceptUploads lets the worker handle media uploads from local users.
+	// This is the only feature that writes into local_content, so it widens
+	// the write guard; off by default.
+	AcceptUploads bool `yaml:"accept_uploads"`
+	// UploadThumbnails selects what is generated when media is uploaded:
+	// "none" (the default) or "synapse" for byte-parity with Synapse's set.
+	//
+	// none is the better setting under dynamic_thumbnails, where Synapse's
+	// upload-time thumbnails are written in a type no request path can ask
+	// for, and where most uploads are never viewed at thumbnail size at all.
+	UploadThumbnails string `yaml:"upload_thumbnails"`
+	// MaxConcurrentUploads bounds simultaneous uploads being written.
+	MaxConcurrentUploads int `yaml:"max_concurrent_uploads"`
+	// UnusedExpirationTime mirrors Synapse's unused_expiration_time: how long
+	// an async media ID may sit unused before it is treated as expired.
+	UnusedExpirationTime time.Duration `yaml:"unused_expiration_time"`
+	// MaxPendingMediaUploads mirrors Synapse's setting of the same name. The
+	// spec requires 429 M_LIMIT_EXCEEDED on /create once a user is over it.
+	MaxPendingMediaUploads int `yaml:"max_pending_media_uploads"`
 	// FetchRemote lets the worker download uncached remote media itself
 	// instead of proxying to Synapse. This is the one feature that writes to
 	// Synapse's media store, so it is off by default and any failure falls
@@ -148,6 +167,9 @@ type UpstreamConfig struct {
 	// Thumbnail is the Synapse media worker to proxy to when the worker cannot
 	// generate a thumbnail itself (animated, unsupported format, oversized).
 	Thumbnail UpstreamTarget `yaml:"thumbnail"`
+	// Upload is the Synapse worker to proxy uploads to when accept_uploads is
+	// off. Falls back to the download upstream when unset.
+	Upload UpstreamTarget `yaml:"upload"`
 }
 
 // UpstreamTarget names one or more Synapse workers to fall back to. Several
@@ -220,6 +242,12 @@ func (c LogConfig) LogRequests() bool {
 	return c.Requests == nil || *c.Requests
 }
 
+// Upload thumbnail modes.
+const (
+	uploadThumbnailsNone    = "none"
+	uploadThumbnailsSynapse = "synapse"
+)
+
 // Synapse's defaults, from synapse/config/repository.py.
 const (
 	synapseDefaultMaxUploadSize  int64 = 50 * 1024 * 1024
@@ -266,10 +294,14 @@ func defaultConfig() Config {
 			LastAccessInterval: time.Minute,
 		},
 		Media: MediaConfig{
-			MaxConcurrentFetches: 4,
-			FetchTimeout:         60 * time.Second,
-			DefaultTimeout:       20 * time.Second,
-			MaxTimeout:           60 * time.Second,
+			UploadThumbnails:       uploadThumbnailsNone,
+			MaxConcurrentUploads:   8,
+			UnusedExpirationTime:   24 * time.Hour,
+			MaxPendingMediaUploads: 5,
+			MaxConcurrentFetches:   4,
+			FetchTimeout:           60 * time.Second,
+			DefaultTimeout:         20 * time.Second,
+			MaxTimeout:             60 * time.Second,
 		},
 		Cache: CacheConfig{
 			MaxBytes:      10 << 30, // 10 GiB
@@ -337,6 +369,20 @@ func (c *Config) validate() error {
 		// declares the intent to write.
 		return fmt.Errorf("media.write_through_thumbnails requires media.fetch_remote to be enabled")
 	}
+	switch c.Media.UploadThumbnails {
+	case "", uploadThumbnailsNone, uploadThumbnailsSynapse:
+	default:
+		return fmt.Errorf("media.upload_thumbnails must be %q or %q, got %q",
+			uploadThumbnailsNone, uploadThumbnailsSynapse, c.Media.UploadThumbnails)
+	}
+	if c.Media.AcceptUploads {
+		if c.Media.MaxUploadSizeOrDefault() <= 0 {
+			return fmt.Errorf("media.max_upload_size must be positive when accept_uploads is on")
+		}
+		if c.ServerName == "" {
+			return fmt.Errorf("server_name is required when accept_uploads is on")
+		}
+	}
 	if c.Media.FetchRemote {
 		if c.Media.SigningKeyPath == "" {
 			return fmt.Errorf("media.signing_key_path is required when fetch_remote is on")
@@ -380,6 +426,23 @@ func (c *Config) deriveFromSynapse() error {
 		}
 		c.Media.MaxImagePixels = &n
 		c.derived.note("media.max_image_pixels", fmt.Sprintf("%d", n))
+	}
+	if hs.MaxPendingMediaUploads != nil && c.Media.MaxPendingMediaUploads == 5 {
+		c.Media.MaxPendingMediaUploads = *hs.MaxPendingMediaUploads
+		c.derived.note("media.max_pending_media_uploads",
+			fmt.Sprintf("%d", *hs.MaxPendingMediaUploads))
+	}
+	if hs.UnusedExpirationTime != nil {
+		d, err := parseSynapseDuration(hs.UnusedExpirationTime)
+		if err != nil {
+			return fmt.Errorf("unused_expiration_time in %s: %w", c.SynapseConfig, err)
+		}
+		c.Media.UnusedExpirationTime = d
+		c.derived.note("media.unused_expiration_time", d.String())
+	}
+	if len(hs.MediaUploadLimits) > 0 && c.Media.AcceptUploads {
+		c.derived.warn("media_upload_limits is configured in Synapse but this worker " +
+			"does not implement per-user quotas; accept_uploads would bypass them")
 	}
 	if c.Media.EnableAuthenticatedMedia == nil && hs.EnableAuthenticatedMedia != nil {
 		c.Media.EnableAuthenticatedMedia = hs.EnableAuthenticatedMedia

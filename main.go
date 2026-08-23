@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -114,6 +115,12 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 	} else {
 		log.Warn().Msg("No download upstream configured; uncached remote media will 404")
 	}
+	if cfg.Upstream.Upload.configured() {
+		if srv.uploadUp, err = NewProxy(cfg.Upstream.Upload, log); err != nil {
+			return fmt.Errorf("upload upstream: %w", err)
+		}
+		log.Info().Str("target", srv.uploadUp.Target()).Msg("Upload fallback configured")
+	}
 	if cfg.Upstream.Thumbnail.configured() {
 		if srv.thumbnailUp, err = NewProxy(cfg.Upstream.Thumbnail, log); err != nil {
 			return fmt.Errorf("thumbnail upstream: %w", err)
@@ -145,6 +152,27 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 			Msg("Fetching remote media directly; the media store is being written to")
 	} else {
 		log.Info().Msg("Remote media fetching is off; uncached remote media is proxied to Synapse")
+	}
+
+	if cfg.Media.AcceptUploads {
+		if err := checkMediaStoreWritable(cfg.Media.StorePath); err != nil {
+			return err
+		}
+		// Uploads are the only feature that writes media this server owns, so
+		// the guard widens only here.
+		srv.paths.AllowUploadWrites()
+		srv.uploader = NewUploader(db, srv.paths, srv.thumbnailer, cfg)
+		sweepStaleUploads(cfg.Media.StorePath, log)
+		log.Warn().
+			Str("thumbnails", cfg.Media.UploadThumbnails).
+			Int("max_concurrent", cfg.Media.MaxConcurrentUploads).
+			Msg("Accepting uploads; local_content and local_thumbnails are now writable")
+		if cfg.Media.UploadThumbnails == uploadThumbnailsNone && !cfg.Media.DynamicThumbnailsEnabled() {
+			log.Warn().Msg("upload_thumbnails is off and Synapse has dynamic_thumbnails off, " +
+				"so uploaded media will have no thumbnails for Synapse to select from")
+		}
+	} else {
+		log.Info().Msg("Uploads are proxied to Synapse")
 	}
 
 	if checkOnly {
@@ -224,6 +252,15 @@ func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 		instrument("client_download", http.HandlerFunc(s.handleClientDownload)))
 	mux.Handle("GET /_matrix/client/v1/media/thumbnail/{serverName}/{mediaId}",
 		instrument("client_thumbnail", http.HandlerFunc(s.handleClientThumbnail)))
+
+	// Uploads. Registered unconditionally: with accept_uploads off they are
+	// proxied to Synapse, which keeps the routing stable either way.
+	mux.Handle("POST /_matrix/media/{version}/upload",
+		instrument("upload", http.HandlerFunc(s.handleUpload)))
+	mux.Handle("POST /_matrix/media/v1/create",
+		instrument("create_media", http.HandlerFunc(s.handleCreateMedia)))
+	mux.Handle("PUT /_matrix/media/{version}/upload/{serverName}/{mediaId}",
+		instrument("async_upload", http.HandlerFunc(s.handleAsyncUpload)))
 
 	// Legacy unauthenticated media. Media stored since authenticated media was
 	// switched on is hidden from these, which on most servers is all of it.
@@ -447,5 +484,38 @@ func logDerivedConfig(log zerolog.Logger, cfg *Config) {
 	}
 	for _, warning := range cfg.derived.Warnings {
 		log.Warn().Msg(warning)
+	}
+}
+
+// sweepStaleUploads removes temporary files left by an interrupted upload.
+//
+// The temp file lives in the destination directory so it can be renamed
+// atomically, which means a crash mid-upload leaks it there. On a volume this
+// close to full that is worth cleaning up at startup rather than letting it
+// accumulate.
+func sweepStaleUploads(base string, log zerolog.Logger) {
+	var removed int
+	for _, dir := range []string{"local_content", "local_thumbnails"} {
+		root := filepath.Join(base, dir)
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			name := d.Name()
+			if !strings.HasPrefix(name, ".incoming-") && !strings.HasPrefix(name, ".thumb-") {
+				return nil
+			}
+			// Only sweep what is clearly abandoned, never a write in flight.
+			if info, err := d.Info(); err == nil && time.Since(info.ModTime()) < time.Hour {
+				return nil
+			}
+			if os.Remove(path) == nil {
+				removed++
+			}
+			return nil
+		})
+	}
+	if removed > 0 {
+		log.Info().Int("removed", removed).Msg("Swept stale upload temporary files")
 	}
 }

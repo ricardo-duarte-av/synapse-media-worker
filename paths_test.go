@@ -245,3 +245,36 @@ func TestWritablePathAgreesWithTheBuilders(t *testing.T) {
 		t.Error("URLCache path must not be writable")
 	}
 }
+
+// Uploads need local_content, but only when that feature is on, and url_cache
+// must stay unwritable in every configuration.
+func TestWritablePathWidensForUploads(t *testing.T) {
+	p := NewMediaPaths(testBase)
+	local := testBase + "/local_content/ab/cd/efgh"
+	localThumb := testBase + "/local_thumbnails/ab/cd/efgh/96-96-image-png-crop"
+
+	if err := p.WritablePath(local); err == nil {
+		t.Error("local_content should not be writable before uploads are enabled")
+	}
+
+	p.AllowUploadWrites()
+	if err := p.WritablePath(local); err != nil {
+		t.Errorf("local_content should be writable with uploads on: %v", err)
+	}
+	if err := p.WritablePath(localThumb); err != nil {
+		t.Errorf("local_thumbnails should be writable with uploads on: %v", err)
+	}
+	// The remote cache stays writable.
+	if err := p.WritablePath(testBase + "/remote_content/ab/cd/ef"); err != nil {
+		t.Errorf("remote_content should remain writable: %v", err)
+	}
+	// The URL preview cache never becomes writable.
+	for _, path := range []string{
+		testBase + "/url_cache/2026-01-01/abc",
+		testBase + "/url_cache_thumbnails/2026-01-01/abc/96-96-image-png-crop",
+	} {
+		if err := p.WritablePath(path); err == nil {
+			t.Errorf("%q must never be writable", path)
+		}
+	}
+}
