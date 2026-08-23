@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -186,5 +187,100 @@ func TestCacheKeyIsHashed(t *testing.T) {
 		if key == secret {
 			t.Fatal("raw access token used as cache key")
 		}
+	}
+}
+
+// Synapse distinguishes an appservice masquerading outside its namespace from
+// one naming a user it never registered. Flattening both into a generic
+// message loses the only information that tells a bridge which mistake it made.
+func TestRejectionIsPassedThrough(t *testing.T) {
+	a, _ := newTestAuth(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errcode":"M_FORBIDDEN",` +
+			`"error":"Application service has not registered this user (@ghost:example.com)"}`))
+	})
+	v, err := a.AuthenticateAs(context.Background(), Credentials{
+		Token: "as_token", UserID: "@ghost:example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.valid {
+		t.Fatal("a refused masquerade was accepted")
+	}
+	if v.rejection == nil {
+		t.Fatal("Synapse's rejection was discarded")
+	}
+	if v.rejection.ErrCode != "M_FORBIDDEN" {
+		t.Errorf("errcode = %q", v.rejection.ErrCode)
+	}
+	if !strings.Contains(v.rejection.Error, "has not registered this user") {
+		t.Errorf("message lost: %q", v.rejection.Error)
+	}
+	if v.status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", v.status)
+	}
+}
+
+// A plain invalid token has no useful upstream body; the worker must still
+// answer, not depend on one being present.
+func TestRejectionWithoutBody(t *testing.T) {
+	a, _ := newTestAuth(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	v, err := a.Authenticate(context.Background(), "bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.valid {
+		t.Fatal("accepted an invalid token")
+	}
+	if v.rejection != nil {
+		t.Errorf("invented a rejection body: %+v", v.rejection)
+	}
+}
+
+// The masquerade parameters must reach Synapse, or it resolves the appservice
+// bot instead of the ghost and the upload is attributed to the wrong user.
+func TestMasqueradeParametersAreForwarded(t *testing.T) {
+	var gotUser, gotDevice string
+	a, _ := newTestAuth(t, func(w http.ResponseWriter, r *http.Request) {
+		gotUser = r.URL.Query().Get("user_id")
+		gotDevice = r.URL.Query().Get("device_id")
+		_, _ = w.Write([]byte(`{"user_id":"` + gotUser + `"}`))
+	})
+	v, err := a.AuthenticateAs(context.Background(), Credentials{
+		Token: "as_token", UserID: "@signal_x:example.com", DeviceID: "DEV1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUser != "@signal_x:example.com" {
+		t.Errorf("user_id forwarded as %q", gotUser)
+	}
+	if gotDevice != "DEV1" {
+		t.Errorf("device_id forwarded as %q", gotDevice)
+	}
+	if v.userID != "@signal_x:example.com" {
+		t.Errorf("resolved to %q, want the ghost", v.userID)
+	}
+}
+
+// One appservice token resolves to many users, so the cache must not serve one
+// ghost's verdict for another.
+func TestCacheKeyIncludesMasquerade(t *testing.T) {
+	var calls int
+	a, _ := newTestAuth(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"user_id":"` + r.URL.Query().Get("user_id") + `"}`))
+	})
+	first, _ := a.AuthenticateAs(context.Background(), Credentials{Token: "t", UserID: "@a:example.com"})
+	second, _ := a.AuthenticateAs(context.Background(), Credentials{Token: "t", UserID: "@b:example.com"})
+	if first.userID == second.userID {
+		t.Fatalf("both resolved to %q; the cache is keyed on the token alone", first.userID)
+	}
+	if calls != 2 {
+		t.Errorf("whoami called %d times, want one per distinct user", calls)
 	}
 }

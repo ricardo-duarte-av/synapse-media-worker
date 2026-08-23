@@ -314,8 +314,17 @@ func (s *Server) authenticateUploader(w http.ResponseWriter, r *http.Request) (s
 	if !verdict.valid {
 		authOutcome.WithLabelValues("rejected").Inc()
 		setOutcome(r.Context(), outcomeUnauthorized)
-		// A rejected masquerade is Synapse telling us this token may not act
-		// as that user, which the spec expresses as 403 rather than 401.
+		// Prefer Synapse's own answer: it distinguishes masquerading outside
+		// the namespace from naming a user the appservice never registered,
+		// and the caller is better served by knowing which.
+		if verdict.rejection != nil {
+			status := verdict.status
+			if status == 0 {
+				status = http.StatusForbidden
+			}
+			writeMatrixError(w, status, verdict.rejection.ErrCode, verdict.rejection.Error)
+			return "", false
+		}
 		if creds.UserID != "" {
 			writeMatrixError(w, http.StatusForbidden, "M_FORBIDDEN",
 				"Application service cannot masquerade as this user")

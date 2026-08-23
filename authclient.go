@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,6 +35,12 @@ type tokenVerdict struct {
 	userID  string
 	isGuest bool
 	expires time.Time
+	// rejection carries Synapse's own answer when it refuses. Synapse
+	// distinguishes an appservice masquerading outside its namespace from one
+	// naming a user it never registered, and passing that through is both
+	// better parity and a far more useful diagnostic than a generic message.
+	rejection *MatrixError
+	status    int
 }
 
 type cacheEntry struct {
@@ -225,7 +232,14 @@ func (a *TokenAuthenticator) callWhoami(ctx context.Context, creds Credentials) 
 			expires: time.Now().Add(a.positiveTTL),
 		}, nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return tokenVerdict{valid: false, expires: time.Now().Add(a.negativeTTL)}, nil
+		v := tokenVerdict{valid: false, expires: time.Now().Add(a.negativeTTL),
+			status: resp.StatusCode}
+		var body MatrixError
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&body); err == nil &&
+			body.ErrCode != "" {
+			v.rejection = &body
+		}
+		return v, nil
 	default:
 		// Anything else (5xx, ratelimit) is an unknown answer, not a rejection.
 		return tokenVerdict{}, fmt.Errorf("whoami returned unexpected status %d", resp.StatusCode)
