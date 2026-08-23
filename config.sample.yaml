@@ -4,7 +4,19 @@
 # must agree with homeserver.yaml; they are duplicated rather than parsed out of
 # it so the worker has no coupling to Synapse's config schema.
 
-# Must match homeserver.yaml's server_name.
+# Read settings from Synapse's own config instead of repeating them here.
+#
+# Strongly recommended. Synapse's size suffixes are binary -- max_image_pixels:
+# 100M means 104857600, not 100000000 -- and transcribing them by hand drifts.
+# Anything this file leaves unset is taken from there; anything set here wins.
+#
+# Mount it read-only. Note it contains every secret Synapse has
+# (macaroon_secret_key, registration_shared_secret, form_secret); mount a
+# stripped copy if the worker should not see them.
+#
+# synapse_config: /data/homeserver.yaml
+
+# Derived from synapse_config when unset.
 server_name: "example.com"
 
 listen:
@@ -19,6 +31,10 @@ listen:
 database:
   # libpq connection string. For a unix socket, put the *directory* containing
   # the socket in the host parameter.
+  #
+  # Derived from Synapse's database.args when unset -- but note Synapse often
+  # points at a connection pooler, while this single process is usually better
+  # off connecting directly. Set it explicitly to do that.
   uri: "postgres://synapse:CHANGEME@/synapse-db?host=/var/sockets&sslmode=disable"
   max_conns: 16
   # last_access_ts is the only thing the worker ever writes to Synapse's
@@ -33,8 +49,9 @@ media:
   # Synapse's signing key, used to authenticate outbound server-key lookups
   # while verifying inbound federation requests.
   signing_key_path: /data/signing.key
-  # Must match homeserver.yaml's max_image_pixels.
-  max_image_pixels: 100000000
+  # Derived from synapse_config when unset. Synapse's suffixes are binary, so
+  # if you do set it here, 100M is 104857600.
+  # max_image_pixels: 104857600
   # How many thumbnails may be generated at once. Generation is CPU-bound and
   # holds the decoded image in memory, so this bounds both. Defaults to the
   # number of usable CPUs; raise it only if generation is queueing while the
@@ -58,14 +75,14 @@ media:
   # Local media thumbnails are unaffected and stay in the worker's cache.
   write_through_thumbnails: false
   fetch_timeout: 60s
-  # Must match homeserver.yaml's max_upload_size. Caps how large a remote file
-  # the worker will store.
-  max_upload_size: 52428800
+  # Derived from synapse_config when unset. Caps how large a remote file the
+  # worker will store.
+  # max_upload_size: 52428800
 
-  # Must match homeserver.yaml's enable_authenticated_media (default true).
-  # When true, media rows with authenticated = true are hidden from the legacy
+  # Derived from synapse_config when unset; Synapse defaults it to true. When
+  # true, media rows with authenticated = true are hidden from the legacy
   # unauthenticated /_matrix/media endpoints.
-  enable_authenticated_media: true
+  # enable_authenticated_media: true
 
 cache:
   # The worker's own writable directory for thumbnails it generates. This must

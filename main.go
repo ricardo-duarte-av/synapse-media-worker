@@ -47,6 +47,7 @@ func main() {
 	}
 
 	log := newLogger(cfg.Log)
+	logDerivedConfig(log, cfg)
 
 	if err := run(cfg, log, *checkOnly); err != nil {
 		log.Fatal().Err(err).Msg("Fatal error")
@@ -100,7 +101,7 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		db:          db,
 		paths:       NewMediaPaths(cfg.Media.StorePath),
 		cache:       cache,
-		thumbnailer: NewThumbnailer(cfg.Media.MaxImagePixels, cfg.Media.MaxConcurrentThumbnails),
+		thumbnailer: NewThumbnailer(cfg.Media.MaxImagePixelsOrDefault(), cfg.Media.MaxConcurrentThumbnails),
 		auth:        auth,
 		log:         log,
 	}
@@ -134,12 +135,12 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		if err := checkMediaStoreWritable(cfg.Media.StorePath); err != nil {
 			return err
 		}
-		fetcher := NewFetcher(fedClient, cfg.Media.MaxUploadSize,
+		fetcher := NewFetcher(fedClient, cfg.Media.MaxUploadSizeOrDefault(),
 			cfg.Media.FetchTimeout, cfg.Media.MaxConcurrentFetches)
 		srv.remote = NewRemoteFetcher(db, srv.paths, fetcher,
-			cfg.Media.EnableAuthenticatedMedia, log)
+			cfg.Media.AuthenticatedMedia(), log)
 		log.Warn().
-			Int64("max_upload_size", cfg.Media.MaxUploadSize).
+			Int64("max_upload_size", cfg.Media.MaxUploadSizeOrDefault()).
 			Int("max_concurrent", cfg.Media.MaxConcurrentFetches).
 			Msg("Fetching remote media directly; the media store is being written to")
 	} else {
@@ -426,4 +427,25 @@ func loadSigningKey(path string) (*federation.SigningKey, int, error) {
 		return nil, 0, fmt.Errorf("signing key file %q contains no keys", path)
 	}
 	return first, count, nil
+}
+
+// logDerivedConfig reports what was taken from Synapse's own configuration, so
+// an operator can see at a glance which values this worker is using and where
+// they came from.
+func logDerivedConfig(log zerolog.Logger, cfg *Config) {
+	if cfg.derived == nil {
+		return
+	}
+	if len(cfg.derived.Applied) > 0 {
+		log.Info().
+			Str("from", cfg.SynapseConfig).
+			Strs("values", cfg.derived.Applied).
+			Msg("Derived settings from Synapse's configuration")
+	}
+	for _, skipped := range cfg.derived.Skipped {
+		log.Warn().Str("from", cfg.SynapseConfig).Msg("Ignored Synapse setting: " + skipped)
+	}
+	for _, warning := range cfg.derived.Warnings {
+		log.Warn().Msg(warning)
+	}
 }

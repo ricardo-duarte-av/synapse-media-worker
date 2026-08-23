@@ -546,7 +546,7 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request) bool
 // hiddenFromLegacy reports whether authenticated media must be hidden from an
 // unauthenticated endpoint.
 func (s *Server) hiddenFromLegacy(mediaAuthenticated, allowAuthenticated bool) bool {
-	return s.cfg.Media.EnableAuthenticatedMedia && !allowAuthenticated && mediaAuthenticated
+	return s.cfg.Media.AuthenticatedMedia() && !allowAuthenticated && mediaAuthenticated
 }
 
 // resolveLocalMedia loads a local media row and applies the quarantine,

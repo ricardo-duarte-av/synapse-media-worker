@@ -54,6 +54,14 @@ services:
 
       - ./config.yaml:/data/config.yaml:ro
 
+      # Optional but recommended: Synapse's own config, so sizes and flags are
+      # read rather than transcribed. Set `synapse_config` in config.yaml to
+      # the path on the right.
+      #
+      # It holds every Synapse secret, so mount a stripped copy instead if the
+      # worker should not see them.
+      # - ${SYNAPSE_CONFIG:-/opt/matrix/synapse/synapse/homeserver.yaml}:/data/homeserver.yaml:ro
+
     healthcheck:
       test: ["CMD", "curl", "-f", "--unix-socket", "/var/sockets/nginx/av-media-worker-go.sock", "http://localhost/health"]
       start_period: "5s"

@@ -230,14 +230,53 @@ unbalanced pool or one sick worker shows up directly instead of as latency.
 
 ## Configuration
 
-Copy `config.sample.yaml` and edit it. Values must agree with `homeserver.yaml`;
-they are duplicated rather than parsed out of it so the worker has no coupling
-to Synapse's config schema. Two in particular matter:
+Copy `config.sample.yaml` and edit it.
 
-- `media.max_image_pixels` must match, or the worker and Synapse will disagree
-  about which images are too large to thumbnail.
-- `media.enable_authenticated_media` must match, or the legacy endpoints will
-  expose media Synapse hides (or hide media Synapse serves).
+Point `synapse_config` at Synapse's `homeserver.yaml` and most of it fills
+itself in: `server_name`, `max_upload_size`, `max_image_pixels`,
+`enable_authenticated_media`, `dynamic_thumbnails`, and the database
+credentials. Anything set in the worker's own config wins.
+
+This is worth doing, because Synapse's size suffixes are **binary**.
+`max_image_pixels: 100M` is 104857600, not 100000000 — a difference this worker
+had wrong by hand, which left a band of image sizes it refused to thumbnail
+while Synapse accepted them.
+
+Two caveats:
+
+- **It contains every secret Synapse has** — `macaroon_secret_key`,
+  `registration_shared_secret`, `form_secret`. The worker only reads a handful
+  of media keys, but the whole file is exposed to the container. Mount a
+  stripped copy if that matters. (The worker already holds database credentials
+  and the signing key, so this is an increment rather than a new category.)
+- **Paths in it are Synapse's, not yours.** `media_store_path` and
+  `signing_key_path` are recorded as they appear inside Synapse's container. A
+  path that does not resolve in the worker's container is skipped with a
+  warning rather than adopted, so set those explicitly unless the layouts match.
+
+Synapse's `database.args` often points at a connection pooler. The worker is a
+single process and is usually better off connecting directly, so set
+`database.uri` explicitly to do that.
+
+The worker logs exactly what it took from Synapse at startup:
+
+```
+Derived settings from Synapse's configuration
+  values=["server_name=example.com","media.max_upload_size=1048576000",
+          "media.max_image_pixels=104857600","media.dynamic_thumbnails=true"]
+```
+
+It also warns about Synapse settings it cannot honour — `media_storage_providers`,
+`prevent_media_downloads_from`, and `dynamic_thumbnails: false` (see below).
+
+### `dynamic_thumbnails: false` is not yet supported
+
+The worker only implements the dynamic behaviour: exact match on width, height,
+method and type, generating on a miss. With `dynamic_thumbnails` off Synapse
+instead scores the stored thumbnails and serves the nearest, so the two will
+disagree — the worker will generate where Synapse would have reused. It is
+detected and warned about at startup rather than failing, since the result is
+still a correct thumbnail, just not the same one.
 
 Validate without starting up:
 

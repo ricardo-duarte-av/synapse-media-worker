@@ -33,11 +33,18 @@ func TestLoadConfigAppliesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Media.MaxImagePixels != 100_000_000 {
-		t.Errorf("max_image_pixels = %d", cfg.Media.MaxImagePixels)
+	// Synapse's own default, and binary: 32M is 33554432, not 32000000.
+	if got := cfg.Media.MaxImagePixelsOrDefault(); got != 32*1024*1024 {
+		t.Errorf("max_image_pixels = %d, want Synapse's 32M default", got)
 	}
-	if !cfg.Media.EnableAuthenticatedMedia {
+	if got := cfg.Media.MaxUploadSizeOrDefault(); got != 50*1024*1024 {
+		t.Errorf("max_upload_size = %d, want Synapse's 50M default", got)
+	}
+	if !cfg.Media.AuthenticatedMedia() {
 		t.Error("enable_authenticated_media should default to true, matching Synapse")
+	}
+	if cfg.Media.DynamicThumbnailsEnabled() {
+		t.Error("dynamic_thumbnails should default to false, matching Synapse")
 	}
 	if !cfg.Database.UpdateLastAccess {
 		t.Error("update_last_access should default to true")

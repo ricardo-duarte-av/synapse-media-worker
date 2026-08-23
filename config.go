@@ -15,8 +15,18 @@ import (
 type Config struct {
 	// ServerName is the homeserver's server_name, e.g. "example.com". It is
 	// used to tell local media apart from remote and as the expected
-	// `destination` in inbound X-Matrix auth headers.
+	// `destination` in inbound X-Matrix auth headers. Derived from
+	// SynapseConfig when unset.
 	ServerName string `yaml:"server_name"`
+
+	// SynapseConfig is the path to Synapse's homeserver.yaml, mounted
+	// read-only. When set, anything this file leaves unset is taken from it
+	// rather than duplicated -- sizes especially, since Synapse's suffixes are
+	// binary and transcribing them by hand goes wrong.
+	//
+	// It contains every secret Synapse has, so mount a stripped copy if the
+	// worker should not see them.
+	SynapseConfig string `yaml:"synapse_config"`
 
 	Listen   ListenConfig   `yaml:"listen"`
 	Database DatabaseConfig `yaml:"database"`
@@ -25,6 +35,9 @@ type Config struct {
 	Auth     AuthConfig     `yaml:"auth"`
 	Upstream UpstreamConfig `yaml:"upstream"`
 	Log      LogConfig      `yaml:"log"`
+
+	// derived records what was taken from Synapse's config, for startup logging.
+	derived *derivedNotes `yaml:"-"`
 }
 
 type ListenConfig struct {
@@ -63,8 +76,8 @@ type MediaConfig struct {
 	// outbound server-key lookups during inbound federation verification.
 	SigningKeyPath string `yaml:"signing_key_path"`
 	// MaxImagePixels mirrors Synapse's max_image_pixels. Images at or above
-	// this many pixels are never thumbnailed by the worker.
-	MaxImagePixels int64 `yaml:"max_image_pixels"`
+	// this many pixels are never thumbnailed by the worker. Derived when unset.
+	MaxImagePixels *int64 `yaml:"max_image_pixels"`
 	// DefaultTimeout is the default ?timeout_ms for waiting on a pending
 	// async upload.
 	DefaultTimeout time.Duration `yaml:"default_timeout"`
@@ -90,12 +103,17 @@ type MediaConfig struct {
 	// Local media thumbnails are unaffected and stay in the worker's cache.
 	WriteThroughThumbnails bool `yaml:"write_through_thumbnails"`
 	// MaxUploadSize mirrors Synapse's max_upload_size and caps how large a
-	// remote file the worker will store.
-	MaxUploadSize int64 `yaml:"max_upload_size"`
+	// remote file the worker will store. Derived when unset.
+	MaxUploadSize *int64 `yaml:"max_upload_size"`
 	// EnableAuthenticatedMedia mirrors Synapse's enable_authenticated_media.
 	// When true, media rows with authenticated = true are hidden from the
-	// legacy unauthenticated /_matrix/media endpoints.
-	EnableAuthenticatedMedia bool `yaml:"enable_authenticated_media"`
+	// legacy unauthenticated /_matrix/media endpoints. Derived when unset.
+	EnableAuthenticatedMedia *bool `yaml:"enable_authenticated_media"`
+	// DynamicThumbnails mirrors Synapse's dynamic_thumbnails. The worker
+	// currently implements only the dynamic behaviour (exact match, generate on
+	// a miss); when Synapse has it off it selects a nearest match instead, and
+	// the two will disagree. Derived when unset.
+	DynamicThumbnails *bool `yaml:"dynamic_thumbnails"`
 }
 
 type CacheConfig struct {
@@ -202,6 +220,40 @@ func (c LogConfig) LogRequests() bool {
 	return c.Requests == nil || *c.Requests
 }
 
+// Synapse's defaults, from synapse/config/repository.py.
+const (
+	synapseDefaultMaxUploadSize  int64 = 50 * 1024 * 1024
+	synapseDefaultMaxImagePixels int64 = 32 * 1024 * 1024
+)
+
+// MaxImagePixelsOrDefault returns the effective pixel limit.
+func (m MediaConfig) MaxImagePixelsOrDefault() int64 {
+	if m.MaxImagePixels != nil {
+		return *m.MaxImagePixels
+	}
+	return synapseDefaultMaxImagePixels
+}
+
+// MaxUploadSizeOrDefault returns the effective upload size limit.
+func (m MediaConfig) MaxUploadSizeOrDefault() int64 {
+	if m.MaxUploadSize != nil {
+		return *m.MaxUploadSize
+	}
+	return synapseDefaultMaxUploadSize
+}
+
+// AuthenticatedMedia reports whether authenticated media is on, defaulting to
+// true as Synapse does.
+func (m MediaConfig) AuthenticatedMedia() bool {
+	return m.EnableAuthenticatedMedia == nil || *m.EnableAuthenticatedMedia
+}
+
+// DynamicThumbnailsEnabled reports Synapse's dynamic_thumbnails, whose default
+// is false.
+func (m MediaConfig) DynamicThumbnailsEnabled() bool {
+	return m.DynamicThumbnails != nil && *m.DynamicThumbnails
+}
+
 func defaultConfig() Config {
 	return Config{
 		Listen: ListenConfig{
@@ -214,13 +266,10 @@ func defaultConfig() Config {
 			LastAccessInterval: time.Minute,
 		},
 		Media: MediaConfig{
-			MaxImagePixels:           100_000_000,
-			MaxConcurrentFetches:     4,
-			FetchTimeout:             60 * time.Second,
-			MaxUploadSize:            50 * 1024 * 1024,
-			DefaultTimeout:           20 * time.Second,
-			MaxTimeout:               60 * time.Second,
-			EnableAuthenticatedMedia: true,
+			MaxConcurrentFetches: 4,
+			FetchTimeout:         60 * time.Second,
+			DefaultTimeout:       20 * time.Second,
+			MaxTimeout:           60 * time.Second,
 		},
 		Cache: CacheConfig{
 			MaxBytes:      10 << 30, // 10 GiB
@@ -245,6 +294,11 @@ func LoadConfig(path string) (*Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if cfg.SynapseConfig != "" {
+		if err := cfg.deriveFromSynapse(); err != nil {
+			return nil, err
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -274,7 +328,7 @@ func (c *Config) validate() error {
 	if c.Auth.WhoamiURL == "" && c.Auth.WhoamiSocket == "" {
 		return fmt.Errorf("auth.whoami_url or auth.whoami_socket is required")
 	}
-	if c.Media.MaxImagePixels <= 0 {
+	if c.Media.MaxImagePixelsOrDefault() <= 0 {
 		return fmt.Errorf("media.max_image_pixels must be positive")
 	}
 	if c.Media.WriteThroughThumbnails && !c.Media.FetchRemote {
@@ -287,9 +341,112 @@ func (c *Config) validate() error {
 		if c.Media.SigningKeyPath == "" {
 			return fmt.Errorf("media.signing_key_path is required when fetch_remote is on")
 		}
-		if c.Media.MaxUploadSize <= 0 {
+		if c.Media.MaxUploadSizeOrDefault() <= 0 {
 			return fmt.Errorf("media.max_upload_size must be positive when fetch_remote is on")
 		}
 	}
 	return nil
+}
+
+// deriveFromSynapse fills in anything this config leaves unset from Synapse's
+// homeserver.yaml. Explicit values always win.
+//
+// Paths are only adopted if they resolve here: homeserver.yaml records them as
+// they appear inside Synapse's container, which is not necessarily where this
+// worker sees them.
+func (c *Config) deriveFromSynapse() error {
+	hs, err := LoadSynapseConfig(c.SynapseConfig)
+	if err != nil {
+		return err
+	}
+	c.derived = &derivedNotes{}
+
+	if c.ServerName == "" && hs.ServerName != "" {
+		c.ServerName = hs.ServerName
+		c.derived.note("server_name", hs.ServerName)
+	}
+	if c.Media.MaxUploadSize == nil && hs.MaxUploadSize != nil {
+		n, err := parseSynapseSize(hs.MaxUploadSize)
+		if err != nil {
+			return fmt.Errorf("max_upload_size in %s: %w", c.SynapseConfig, err)
+		}
+		c.Media.MaxUploadSize = &n
+		c.derived.note("media.max_upload_size", fmt.Sprintf("%d", n))
+	}
+	if c.Media.MaxImagePixels == nil && hs.MaxImagePixels != nil {
+		n, err := parseSynapseSize(hs.MaxImagePixels)
+		if err != nil {
+			return fmt.Errorf("max_image_pixels in %s: %w", c.SynapseConfig, err)
+		}
+		c.Media.MaxImagePixels = &n
+		c.derived.note("media.max_image_pixels", fmt.Sprintf("%d", n))
+	}
+	if c.Media.EnableAuthenticatedMedia == nil && hs.EnableAuthenticatedMedia != nil {
+		c.Media.EnableAuthenticatedMedia = hs.EnableAuthenticatedMedia
+		c.derived.note("media.enable_authenticated_media",
+			fmt.Sprintf("%t", *hs.EnableAuthenticatedMedia))
+	}
+	if c.Media.DynamicThumbnails == nil && hs.DynamicThumbnails != nil {
+		c.Media.DynamicThumbnails = hs.DynamicThumbnails
+		c.derived.note("media.dynamic_thumbnails", fmt.Sprintf("%t", *hs.DynamicThumbnails))
+	}
+	if c.Media.StorePath == "" && hs.MediaStorePath != "" {
+		if _, err := os.Stat(hs.MediaStorePath); err == nil {
+			c.Media.StorePath = hs.MediaStorePath
+			c.derived.note("media.store_path", hs.MediaStorePath)
+		} else {
+			c.derived.skip("media.store_path", hs.MediaStorePath,
+				"path does not exist in this container")
+		}
+	}
+	if c.Media.SigningKeyPath == "" && hs.SigningKeyPath != "" {
+		if _, err := os.Stat(hs.SigningKeyPath); err == nil {
+			c.Media.SigningKeyPath = hs.SigningKeyPath
+			c.derived.note("media.signing_key_path", hs.SigningKeyPath)
+		} else {
+			c.derived.skip("media.signing_key_path", hs.SigningKeyPath,
+				"path does not exist in this container")
+		}
+	}
+	if c.Database.URI == "" {
+		if uri, ok := hs.DatabaseURI(); ok {
+			c.Database.URI = uri
+			// Never logged with the value: it carries the password.
+			c.derived.note("database.uri", "(from Synapse's database.args)")
+		}
+	}
+
+	if len(hs.StorageProviders) > 0 {
+		c.derived.warn("media_storage_providers is configured in Synapse; " +
+			"this worker only reads the local media store and will not find media held only in a provider")
+	}
+	if len(hs.PreventMediaDownloadsFrom) > 0 && c.Media.FetchRemote {
+		c.derived.warn("prevent_media_downloads_from is configured in Synapse but " +
+			"this worker does not implement it; fetch_remote would bypass that blocklist")
+	}
+	if !c.Media.DynamicThumbnailsEnabled() {
+		c.derived.warn("Synapse has dynamic_thumbnails off, so it selects a nearest-matching " +
+			"thumbnail; this worker only does exact matching and the two will disagree")
+	}
+	return nil
+}
+
+// derivedNotes records what was taken from Synapse's config, for logging once
+// at startup.
+type derivedNotes struct {
+	Applied  []string
+	Skipped  []string
+	Warnings []string
+}
+
+func (d *derivedNotes) note(key, value string) {
+	d.Applied = append(d.Applied, key+"="+value)
+}
+
+func (d *derivedNotes) skip(key, value, why string) {
+	d.Skipped = append(d.Skipped, fmt.Sprintf("%s=%s (%s)", key, value, why))
+}
+
+func (d *derivedNotes) warn(msg string) {
+	d.Warnings = append(d.Warnings, msg)
 }
