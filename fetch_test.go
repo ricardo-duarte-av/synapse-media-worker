@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+
+	"maunium.net/go/mautrix"
 )
 
 // upload_name comes from the file part's Content-Disposition. Synapse prefers
@@ -106,5 +111,48 @@ func TestCopyBodyBoundary(t *testing.T) {
 	dst.Reset()
 	if _, err := f.copyBody(bytes.NewReader(make([]byte, 101)), &dst, &FetchedMedia{}); err == nil {
 		t.Error("a body one byte over the limit was accepted")
+	}
+}
+
+// A definitive 404 from the origin must be distinguishable from a network
+// failure: the first means Synapse would agree, the second means it deserves a
+// second opinion.
+func TestOriginStatusExtractsTheRemoteStatus(t *testing.T) {
+	notFound := mautrix.HTTPError{
+		RespError: &mautrix.RespError{ErrCode: "M_NOT_FOUND", StatusCode: 404},
+	}
+	if got := originStatus(notFound); got != 404 {
+		t.Errorf("RespError status = %d, want 404", got)
+	}
+
+	// Some paths carry the response rather than a parsed error body.
+	viaResponse := mautrix.HTTPError{Response: &http.Response{StatusCode: 404}}
+	if got := originStatus(viaResponse); got != 404 {
+		t.Errorf("Response status = %d, want 404", got)
+	}
+
+	// A DNS or TLS failure never reached the origin, so there is no status.
+	if got := originStatus(errors.New("dial tcp: lookup dead.example: no such host")); got != 0 {
+		t.Errorf("network error status = %d, want 0", got)
+	}
+	if got := originStatus(mautrix.HTTPError{WrappedError: errors.New("tls: unrecognized name")}); got != 0 {
+		t.Errorf("TLS error status = %d, want 0", got)
+	}
+
+	// Wrapped errors must still be found.
+	wrapped := fmt.Errorf("fetching: %w", notFound)
+	if got := originStatus(wrapped); got != 404 {
+		t.Errorf("wrapped status = %d, want 404", got)
+	}
+}
+
+// Only a 404 is definitive. A 5xx or a timeout must keep falling back, so the
+// short-circuit cannot turn a transient upstream problem into a hard 404.
+func TestOnlyNotFoundIsDefinitive(t *testing.T) {
+	for _, status := range []int{500, 502, 503, 429, 403} {
+		err := mautrix.HTTPError{RespError: &mautrix.RespError{StatusCode: status}}
+		if originStatus(err) == http.StatusNotFound {
+			t.Errorf("status %d was treated as a definitive 404", status)
+		}
 	}
 }

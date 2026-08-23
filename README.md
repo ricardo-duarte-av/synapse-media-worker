@@ -253,6 +253,21 @@ Set `upload_thumbnails: synapse` for byte-parity if you need it. Note that with
 `dynamic_thumbnails` off, Synapse selects a nearest match from stored
 thumbnails, and media uploaded through this worker would have none to score.
 
+### `short_circuit_missing_remote`
+
+Off by default. When the origin server answers `404`, the worker normally still
+proxies to Synapse, which then reaches the same conclusion — two attempts at the
+same answer, with the client waiting for both. On one real server 11,881
+proxied requests ended in `404` that way.
+
+With this on, a `404` from the origin is answered directly. Only that is treated
+as definitive: DNS failures, TLS failures, timeouts and 5xx still fall back,
+because those may be this worker's network rather than the media's absence, and
+Synapse deserves a second opinion.
+
+Worth enabling once you have metrics showing what the fallback actually absorbs
+— `proxied_total{reason="fetch_failed"}` — rather than up front.
+
 ## Concurrency
 
 Every request runs in its own goroutine, so the worker serves as many at once

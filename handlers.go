@@ -648,6 +648,16 @@ func (s *Server) fetchRemote(
 	}
 	media, err := s.remote.FetchAndStore(r.Context(), origin, mediaID)
 	if err != nil {
+		if errors.Is(err, ErrOriginNotFound) && s.cfg.Media.ShortCircuitMissingRemote {
+			// The origin says it does not have this. Synapse would reach the
+			// same conclusion, so answer now rather than making the client
+			// wait for a second attempt at it.
+			remoteFetches.WithLabelValues("origin_not_found").Inc()
+			setOutcome(r.Context(), outcomeNotFound)
+			annotate(r.Context(), func(rl *reqLog) { rl.reason = "origin_not_found" })
+			respondNotFound(w, r.URL.Path)
+			return nil
+		}
 		if errors.Is(err, ErrTooLarge) {
 			// Synapse answers 502 M_TOO_LARGE here rather than proxying, and
 			// proxying would only make Synapse download it too.

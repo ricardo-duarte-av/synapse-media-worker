@@ -112,6 +112,16 @@ type MediaConfig struct {
 	// Synapse's media store, so it is off by default and any failure falls
 	// back to proxying.
 	FetchRemote bool `yaml:"fetch_remote"`
+	// ShortCircuitMissingRemote answers 404 directly when the origin server
+	// says it does not have the media, instead of proxying to Synapse.
+	//
+	// Off by default. The fallback is a safety net: Synapse occasionally
+	// succeeds where the worker did not, and it keeps its own per-destination
+	// backoff. But an origin that answers 404 will tell Synapse the same, so
+	// with this on the client is spared a second attempt at the same answer.
+	// Failures that are not definitive -- DNS, TLS, timeouts, 5xx -- still fall
+	// back regardless of this setting.
+	ShortCircuitMissingRemote bool `yaml:"short_circuit_missing_remote"`
 	// MaxConcurrentFetches bounds simultaneous federated downloads.
 	MaxConcurrentFetches int `yaml:"max_concurrent_fetches"`
 	// FetchTimeout bounds a single federated download.

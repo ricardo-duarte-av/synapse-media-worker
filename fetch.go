@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/federation"
 )
 
@@ -33,6 +34,16 @@ var ErrTooLarge = errors.New("remote file is too large")
 // ErrFetchFailed means the download did not complete. Callers fall back to
 // proxying rather than surfacing it.
 var ErrFetchFailed = errors.New("remote media fetch failed")
+
+// ErrOriginNotFound means the origin server answered 404: the media does not
+// exist there.
+//
+// This is worth distinguishing because it is definitive. A dead DNS name or a
+// TLS failure might be our resolver or our network, and Synapse deserves a
+// second opinion; an origin that answers "no such media" will tell Synapse the
+// same thing, so proxying only makes the client wait for two attempts at the
+// same answer.
+var ErrOriginNotFound = errors.New("origin does not have this media")
 
 // FetchedMedia describes a downloaded file, before it is stored.
 type FetchedMedia struct {
@@ -98,6 +109,9 @@ func (f *Fetcher) Fetch(ctx context.Context, serverName, mediaID string, dst io.
 		DontReadBody: true,
 	})
 	if err != nil {
+		if originStatus(err) == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %v", ErrOriginNotFound, err)
+		}
 		return nil, fmt.Errorf("%w: %v", ErrFetchFailed, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -248,4 +262,20 @@ func filenameFromDisposition(disposition string) string {
 		return ""
 	}
 	return name
+}
+
+// originStatus digs the origin server's HTTP status out of a federation error,
+// or returns 0 when the request never got that far.
+func originStatus(err error) int {
+	var httpErr mautrix.HTTPError
+	if !errors.As(err, &httpErr) {
+		return 0
+	}
+	if httpErr.RespError != nil && httpErr.RespError.StatusCode != 0 {
+		return httpErr.RespError.StatusCode
+	}
+	if httpErr.Response != nil {
+		return httpErr.Response.StatusCode
+	}
+	return 0
 }

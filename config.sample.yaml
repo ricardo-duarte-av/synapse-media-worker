@@ -88,6 +88,15 @@ media:
 
   fetch_remote: false
   max_concurrent_fetches: 4
+  # Answer 404 directly when the origin server says it does not have the media,
+  # instead of proxying to Synapse.
+  #
+  # Off by default: the fallback is a safety net, and Synapse keeps its own
+  # per-destination backoff. But an origin that answers 404 will tell Synapse
+  # the same, so this spares the client a second attempt at the same answer and
+  # takes that load off the Python workers. Failures that are not definitive --
+  # DNS, TLS, timeouts, 5xx -- still fall back regardless.
+  short_circuit_missing_remote: false
   # Write thumbnails generated for REMOTE media into Synapse's media store
   # rather than the worker's own cache, so they are permanent instead of
   # LRU-evictable and Synapse can serve them too. Requires fetch_remote.
