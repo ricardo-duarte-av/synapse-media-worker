@@ -380,9 +380,11 @@ Content-type parameters are stripped before the lookup, as Synapse does, so
 media stored as `image/png; charset=binary` is still thumbnailed rather than
 being treated as an unknown format.
 
-The one format where the two differ is **animated WebP**: Synapse produces it,
-this worker does not, so `?animated=true` is proxied. Still WebP is decoded
-normally.
+Animated WebP is thumbnailed by extracting its first frame, since the Go
+decoder handles still WebP but cannot walk animation frames. A `?animated=true`
+request, which asks for an *animated* WebP thumbnail, is still proxied: that
+needs a WebP encoder, and serving a static image instead would be a visible
+quality regression against what Synapse produces.
 
 ### `dynamic_thumbnails: false` is not yet supported
 

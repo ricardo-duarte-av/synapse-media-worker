@@ -210,6 +210,13 @@ func (t *Thumbnailer) Generate(ctx context.Context, srcPath string, sourceType s
 	if err != nil {
 		return nil, fmt.Errorf("reading source media: %w", err)
 	}
+	// An animated WebP has to be reduced to its first frame first: the decoder
+	// handles still WebP but cannot walk animation frames, and without this a
+	// plain static thumbnail of an animated source would be refused.
+	if frame, ok := firstWebPFrame(raw); ok {
+		raw = frame
+	}
+
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		// A file that will not decode is not an error worth retrying; Synapse
