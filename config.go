@@ -112,16 +112,19 @@ type MediaConfig struct {
 	// Synapse's media store, so it is off by default and any failure falls
 	// back to proxying.
 	FetchRemote bool `yaml:"fetch_remote"`
-	// ShortCircuitMissingRemote answers 404 directly when the origin server
-	// says it does not have the media, instead of proxying to Synapse.
+	// ProxyFailedFetches hands a failed remote fetch to Synapse to try again,
+	// rather than answering the client directly.
 	//
-	// Off by default. The fallback is a safety net: Synapse occasionally
-	// succeeds where the worker did not, and it keeps its own per-destination
-	// backoff. But an origin that answers 404 will tell Synapse the same, so
-	// with this on the client is spared a second attempt at the same answer.
-	// Failures that are not definitive -- DNS, TLS, timeouts, 5xx -- still fall
-	// back regardless of this setting.
-	ShortCircuitMissingRemote bool `yaml:"short_circuit_missing_remote"`
+	// Defaults to true, which is the safer starting point. Turning it off is
+	// usually the right call once fetching is trusted: federation is full of
+	// defunct servers, and a DNS or TLS failure will fail for Synapse exactly
+	// as it failed here, so proxying buys a second attempt at the same answer
+	// while the client waits for both.
+	//
+	// With it off, failures are answered with the status Synapse itself would
+	// have produced: the origin's own error for a 404, and 502 for everything
+	// else.
+	ProxyFailedFetches *bool `yaml:"proxy_failed_fetches"`
 	// MaxConcurrentFetches bounds simultaneous federated downloads.
 	MaxConcurrentFetches int `yaml:"max_concurrent_fetches"`
 	// FetchTimeout bounds a single federated download.
@@ -278,6 +281,12 @@ func (m MediaConfig) MaxUploadSizeOrDefault() int64 {
 		return *m.MaxUploadSize
 	}
 	return synapseDefaultMaxUploadSize
+}
+
+// ProxyFetchFailures reports whether a failed remote fetch should be handed to
+// Synapse, defaulting to true.
+func (m MediaConfig) ProxyFetchFailures() bool {
+	return m.ProxyFailedFetches == nil || *m.ProxyFailedFetches
 }
 
 // AuthenticatedMedia reports whether authenticated media is on, defaulting to

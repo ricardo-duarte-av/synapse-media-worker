@@ -35,6 +35,7 @@ const (
 	outcomeTooLarge     = "too_large"     // refused, over max_upload_size
 	outcomeProxied      = "proxied"       // handed back to Synapse
 	outcomeNotFound     = "not_found"
+	outcomeUnreachable  = "unreachable" // the origin server could not be reached
 	outcomeUnauthorized = "unauthorized"
 	outcomeNotModified  = "not_modified"
 )

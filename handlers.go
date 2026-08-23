@@ -648,16 +648,6 @@ func (s *Server) fetchRemote(
 	}
 	media, err := s.remote.FetchAndStore(r.Context(), origin, mediaID)
 	if err != nil {
-		if errors.Is(err, ErrOriginNotFound) && s.cfg.Media.ShortCircuitMissingRemote {
-			// The origin says it does not have this. Synapse would reach the
-			// same conclusion, so answer now rather than making the client
-			// wait for a second attempt at it.
-			remoteFetches.WithLabelValues("origin_not_found").Inc()
-			setOutcome(r.Context(), outcomeNotFound)
-			annotate(r.Context(), func(rl *reqLog) { rl.reason = "origin_not_found" })
-			respondNotFound(w, r.URL.Path)
-			return nil
-		}
 		if errors.Is(err, ErrTooLarge) {
 			// Synapse answers 502 M_TOO_LARGE here rather than proxying, and
 			// proxying would only make Synapse download it too.
@@ -667,6 +657,28 @@ func (s *Server) fetchRemote(
 			return nil
 		}
 		remoteFetches.WithLabelValues("failed").Inc()
+
+		if !s.cfg.Media.ProxyFetchFailures() {
+			// Answer with what Synapse itself would have said. Anything that
+			// stopped us reaching the origin -- DNS, TLS, a refused connection,
+			// a timeout -- would stop Synapse too, so a second attempt only
+			// makes the client wait twice for the same answer.
+			s.log.Warn().Err(err).
+				Str("origin", origin).Str("media_id", mediaID).
+				Msg("Could not fetch remote media")
+			if errors.Is(err, ErrOriginNotFound) {
+				remoteFetches.WithLabelValues("origin_not_found").Inc()
+				setOutcome(r.Context(), outcomeNotFound)
+				annotate(r.Context(), func(rl *reqLog) { rl.reason = "origin_not_found" })
+				respondNotFound(w, r.URL.Path)
+				return nil
+			}
+			setOutcome(r.Context(), outcomeUnreachable)
+			annotate(r.Context(), func(rl *reqLog) { rl.reason = "origin_unreachable" })
+			writeMatrixError(w, http.StatusBadGateway, "M_UNKNOWN", "Failed to fetch remote media")
+			return nil
+		}
+
 		s.log.Warn().Err(err).
 			Str("origin", origin).Str("media_id", mediaID).
 			Msg("Could not fetch remote media, falling back to Synapse")

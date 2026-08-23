@@ -88,15 +88,17 @@ media:
 
   fetch_remote: false
   max_concurrent_fetches: 4
-  # Answer 404 directly when the origin server says it does not have the media,
-  # instead of proxying to Synapse.
+  # Hand a failed remote fetch to Synapse to try again, or answer the client
+  # directly.
   #
-  # Off by default: the fallback is a safety net, and Synapse keeps its own
-  # per-destination backoff. But an origin that answers 404 will tell Synapse
-  # the same, so this spares the client a second attempt at the same answer and
-  # takes that load off the Python workers. Failures that are not definitive --
-  # DNS, TLS, timeouts, 5xx -- still fall back regardless.
-  short_circuit_missing_remote: false
+  # Defaults to true, the safer starting point. Turning it off is usually right
+  # once fetching is trusted: federation is full of defunct servers, and a DNS
+  # or TLS failure will fail for Synapse exactly as it failed here, so proxying
+  # buys a second attempt at the same answer while the client waits for both.
+  #
+  # With it off, failures are answered with the status Synapse itself would
+  # produce: the origin's own error for a 404, and 502 for everything else.
+  proxy_failed_fetches: true
   # Write thumbnails generated for REMOTE media into Synapse's media store
   # rather than the worker's own cache, so they are permanent instead of
   # LRU-evictable and Synapse can serve them too. Requires fetch_remote.

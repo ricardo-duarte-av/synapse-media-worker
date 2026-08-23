@@ -253,20 +253,32 @@ Set `upload_thumbnails: synapse` for byte-parity if you need it. Note that with
 `dynamic_thumbnails` off, Synapse selects a nearest match from stored
 thumbnails, and media uploaded through this worker would have none to score.
 
-### `short_circuit_missing_remote`
+### `proxy_failed_fetches`
 
-Off by default. When the origin server answers `404`, the worker normally still
-proxies to Synapse, which then reaches the same conclusion — two attempts at the
-same answer, with the client waiting for both. On one real server 11,881
-proxied requests ended in `404` that way.
+Defaults to true: a remote fetch the worker could not complete is handed to
+Synapse, which tries again.
 
-With this on, a `404` from the origin is answered directly. Only that is treated
-as definitive: DNS failures, TLS failures, timeouts and 5xx still fall back,
-because those may be this worker's network rather than the media's absence, and
-Synapse deserves a second opinion.
+That is the safe starting point, but it is usually worth turning off once
+fetching is trusted. Federation is full of defunct servers, and whatever
+stopped the worker reaching an origin — a DNS name that no longer resolves, a
+TLS certificate for a host that is gone, a refused connection — stops Synapse
+just the same. The second attempt reaches the same conclusion while the client
+waits for both. On one real server, 11,881 proxied requests ended in `404`
+that way, and unreachable origins outnumbered genuine 404s heavily.
 
-Worth enabling once you have metrics showing what the fallback actually absorbs
-— `proxied_total{reason="fetch_failed"}` — rather than up front.
+With it off, failures are answered with the status Synapse itself produces:
+
+| Failure | Answer |
+|---|---|
+| Origin returned 404 | the origin's own error |
+| DNS, TLS, refused, timeout, 5xx | `502` "Failed to fetch remote media" |
+
+The one case where the fallback still earns its keep is a difference between
+the two federation clients — if this worker resolved a server differently to
+Synapse, proxying would paper over it. That is worth ruling out with metrics
+before switching: `remote_fetches_total{result="failed"}` against
+`{result="fetched"}` tells you the rate, and the log line names the origin and
+the exact error for each one.
 
 ## Concurrency
 

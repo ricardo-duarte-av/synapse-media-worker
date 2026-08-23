@@ -101,3 +101,34 @@ func TestUpstreamConfigured(t *testing.T) {
 		t.Error("url target not reported as configured")
 	}
 }
+
+// Proxying a failed fetch is the default, so an existing deployment keeps its
+// safety net until the operator decides otherwise.
+func TestProxyFailedFetchesDefaultsOn(t *testing.T) {
+	if !(MediaConfig{}).ProxyFetchFailures() {
+		t.Error("proxy_failed_fetches should default to true")
+	}
+	off := false
+	if (MediaConfig{ProxyFailedFetches: &off}).ProxyFetchFailures() {
+		t.Error("proxy_failed_fetches: false should disable the fallback")
+	}
+	on := true
+	if !(MediaConfig{ProxyFailedFetches: &on}).ProxyFetchFailures() {
+		t.Error("proxy_failed_fetches: true should keep it")
+	}
+}
+
+// The setting has to survive a round trip through YAML, since false is the
+// zero value and a pointer is what distinguishes "off" from "unset".
+func TestProxyFailedFetchesParsesFalse(t *testing.T) {
+	body := strings.Replace(minimalConfig,
+		"media:\n  store_path: /data/media_store",
+		"media:\n  store_path: /data/media_store\n  proxy_failed_fetches: false", 1)
+	cfg, err := LoadConfig(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Media.ProxyFetchFailures() {
+		t.Error("proxy_failed_fetches: false was not applied")
+	}
+}
