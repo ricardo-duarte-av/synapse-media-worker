@@ -130,6 +130,24 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		log.Warn().Msg("No thumbnail upstream configured; animated and undecodable thumbnails will 404")
 	}
 
+	passthrough := cfg.Upstream.Passthrough
+	if !passthrough.configured() {
+		passthrough = cfg.Upstream.Download
+	}
+	if passthrough.configured() {
+		if err := checkNotSelf(passthrough, cfg.Listen); err != nil {
+			return err
+		}
+		if srv.passthroughUp, err = NewProxy(passthrough, log); err != nil {
+			return fmt.Errorf("passthrough upstream: %w", err)
+		}
+		log.Info().Str("target", srv.passthroughUp.Target()).
+			Msg("Passing unimplemented media endpoints through to Synapse")
+	} else {
+		log.Warn().Msg("No passthrough upstream; media endpoints this worker " +
+			"does not implement will 404 rather than reaching Synapse")
+	}
+
 	serverAuth, fedClient, err := newFederationAuth(cfg, log)
 	if err != nil {
 		return err
@@ -284,7 +302,31 @@ func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 		instrument("federation_download", http.HandlerFunc(s.handleFederationDownload)))
 	fedMux.Handle("GET /_matrix/federation/v1/media/thumbnail/{mediaId}",
 		instrument("federation_thumbnail", http.HandlerFunc(s.handleFederationThumbnail)))
+	// A federation media endpoint this worker does not implement still had its
+	// X-Matrix signature checked above; Synapse will check it again, which
+	// costs a little and keeps the passthrough uniform.
+	fedMux.Handle("/", instrument("passthrough", http.HandlerFunc(s.handlePassthrough)))
 	mux.Handle("/_matrix/federation/v1/media/", serverAuth.AuthenticateMiddleware(fedMux))
+
+	// Anything else on the media surface goes to Synapse. These are the
+	// prefixes docs/workers.md assigns to synapse.app.media_repository, so a
+	// deployment can route the whole surface here without enumerating which
+	// parts this worker happens to implement.
+	for _, prefix := range mediaPrefixes {
+		mux.Handle(prefix, instrument("passthrough", http.HandlerFunc(s.handlePassthrough)))
+	}
+	// The media admin APIs share prefixes with unrelated admin APIs, so these
+	// are matched in the handler rather than forwarded by prefix.
+	for _, prefix := range []string{
+		"/_synapse/admin/v1/purge_media_cache",
+		"/_synapse/admin/v1/media/",
+		"/_synapse/admin/v1/quarantine_media/",
+		"/_synapse/admin/v1/room/",
+		"/_synapse/admin/v1/user/",
+		"/_synapse/admin/v1/users/",
+	} {
+		mux.Handle(prefix, instrument("admin_passthrough", http.HandlerFunc(s.handleAdminPassthrough)))
+	}
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -546,4 +588,20 @@ func sweepStaleUploads(base string, log zerolog.Logger, stop <-chan struct{}) {
 	event.Int("removed", removed).Int("scanned", scanned).
 		Dur("took", time.Since(started)).
 		Msg("Swept stale upload temporary files")
+}
+
+// checkNotSelf refuses an upstream that points back at this worker.
+//
+// With a catch-all passthrough, an upstream aimed at our own socket turns a
+// configuration typo into a request loop that is very hard to read from logs.
+func checkNotSelf(target UpstreamTarget, listen ListenConfig) error {
+	for _, e := range target.Endpoints() {
+		if e.Socket != "" && listen.Socket != "" && cleanAbs(e.Socket) == cleanAbs(listen.Socket) {
+			return fmt.Errorf("upstream %s is this worker's own listen socket; requests would loop back on themselves", e.Socket)
+		}
+		if e.URL != "" && listen.Addr != "" && strings.HasSuffix(e.URL, listen.Addr) {
+			return fmt.Errorf("upstream %s appears to be this worker's own address; requests would loop back on themselves", e.URL)
+		}
+	}
+	return nil
 }

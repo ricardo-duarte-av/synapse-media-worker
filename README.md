@@ -31,9 +31,51 @@ default; see below.
 | GET | `/_matrix/media/{r0,v1,v3}/download|thumbnail/...` (legacy, unauthenticated) |
 | GET | `/health`, `/metrics` |
 
-**Left to Synapse — do not route these here:** `/_matrix/media/v3/upload`,
-`/_matrix/media/v1/create`, `/_matrix/client/v1/media/preview_url`,
-`/_matrix/client/v1/media/config`, and every `/_synapse/admin/*` endpoint.
+With `accept_uploads` on it also serves `POST /_matrix/media/{r0,v1,v3}/upload`,
+`POST /_matrix/media/v1/create` and `PUT /_matrix/media/v3/upload/{server}/{id}`.
+
+Everything else on the media surface — `/media/config`, `preview_url`, the media
+admin APIs — is [passed through](#passing-through-what-it-does-not-implement) to
+Synapse, so you can route the whole surface here.
+
+## Passing through what it does not implement
+
+The worker forwards, unexamined, anything under `/_matrix/media/`,
+`/_matrix/client/v1/media/` and `/_matrix/federation/v1/media/` that it does not
+handle itself, plus the media admin APIs. So nginx can send it every path
+`docs/workers.md` assigns to a `synapse.app.media_repository` and the worker
+sorts out which half it answers — you do not have to keep a routing table in
+step with which endpoints it happens to implement.
+
+The scope is deliberately not "everything that arrives". A blanket catch-all
+would make this a general reverse proxy for whatever reached the socket, and the
+`/_synapse/admin/` prefixes in particular carry plenty that has nothing to do
+with media. So the admin APIs are matched against Synapse's own list —
+
+```
+^/_synapse/admin/v1/purge_media_cache$
+^/_synapse/admin/v1/room/.*/media.*$
+^/_synapse/admin/v1/user/.*/media.*$
+^/_synapse/admin/v1/media/.*$
+^/_synapse/admin/v1/quarantine_media/.*$
+^/_synapse/admin/v1/users/.*/media$
+```
+
+— and anything else under those prefixes gets a 404 here rather than a free ride
+to your admin API. `/_synapse/admin/v1/users/@a:example.com` is refused;
+`/_synapse/admin/v1/users/@a:example.com/media` is forwarded.
+
+Two things to get right in `upstream.passthrough`:
+
+- **Quarantine needs a writer.** The quarantine and purge admin APIs must reach
+  an instance configured as a `quarantined_media_changes` writer. Any media
+  worker will do for downloads; not for these.
+- **URL previews need `url_preview_enabled`** on the target worker.
+
+If no passthrough upstream is configured the worker answers 404 for these paths,
+which is honest — it does not serve them and cannot say who does. An upstream
+pointing back at the worker's own listen socket is refused at startup, since
+with a catch-all that turns a typo into a request loop.
 
 ## How it decides
 
@@ -434,12 +476,20 @@ upstream av-media-worker-go {
 }
 ```
 
-and repoint only the download and thumbnail locations at it, leaving uploads and
-the `/_synapse/admin/` blocks on the Python workers.
+and point the media locations at it. Because the worker passes through what it
+does not implement, that can be the whole media surface rather than a
+hand-maintained list of the endpoints it serves:
 
-Keep the Python media workers running. They still handle uploads, URL previews
-and admin, and they are the proxy target for the fallbacks above. Once the Go
-worker is proven, scale them down rather than removing them.
+```nginx
+location ~ ^/_matrix/(media|client/v1/media|federation/v1/media)/ {
+    proxy_pass http://av-media-worker-go;
+}
+```
+
+Keep at least one Python media worker running. It is the passthrough target for
+`/media/config`, URL previews and the media admin APIs, and the fallback target
+for anything the Go worker declines. One is enough once the Go worker is
+carrying the reads and uploads.
 
 ### A note on caching proxies
 

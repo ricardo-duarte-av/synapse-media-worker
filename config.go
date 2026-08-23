@@ -183,6 +183,14 @@ type UpstreamConfig struct {
 	// Upload is the Synapse worker to proxy uploads to when accept_uploads is
 	// off. Falls back to the download upstream when unset.
 	Upload UpstreamTarget `yaml:"upload"`
+	// Passthrough receives everything on the media surface this worker does
+	// not implement -- /media/config, preview_url and the media admin APIs.
+	// Falls back to the download upstream when unset.
+	//
+	// The quarantine admin APIs must reach an instance configured as a
+	// quarantined_media_changes writer, so this is not interchangeable with
+	// any media worker.
+	Passthrough UpstreamTarget `yaml:"passthrough"`
 }
 
 // UpstreamTarget names one or more Synapse workers to fall back to. Several

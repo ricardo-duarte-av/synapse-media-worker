@@ -113,6 +113,21 @@ Configuration:
   before.
 - Paths in `homeserver.yaml` are as they appear inside *Synapse's* container.
 
+Passthrough:
+
+- The worker forwards the media surface it does not implement (see
+  `passthrough.go`), so nginx can route it every path `docs/workers.md` gives a
+  media worker. Keep that list in step with Synapse when it grows.
+- The `/_synapse/admin/` prefixes carry plenty that is **not** media. Match the
+  media admin paths, never forward those prefixes wholesale, or the worker
+  becomes a general admin proxy.
+- The quarantine and purge admin APIs need a `quarantined_media_changes`
+  writer, and `preview_url` needs `url_preview_enabled`. The passthrough
+  upstream is not interchangeable with any media worker.
+- Registering a prefix that overlaps the worker's own patterns is a `ServeMux`
+  panic at *registration*, i.e. at startup. `TestRoutesRegisterWithoutConflict`
+  builds the real route table for that reason.
+
 Libraries:
 
 - `federation.Client.DownloadMedia` in mautrix v0.30.1 returns `nil, nil, nil`

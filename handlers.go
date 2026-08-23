@@ -39,7 +39,11 @@ type Server struct {
 	uploader *Uploader
 	// uploadUp is the Synapse upload worker to proxy to.
 	uploadUp *Proxy
-	log      zerolog.Logger
+	// passthroughUp receives requests on the media surface that this worker
+	// does not implement: /media/config, preview_url, the admin APIs, and
+	// anything a future Synapse adds.
+	passthroughUp *Proxy
+	log           zerolog.Logger
 
 	// generating collapses concurrent generation of the same thumbnail, so a
 	// popular image is decoded once rather than once per waiting request.
