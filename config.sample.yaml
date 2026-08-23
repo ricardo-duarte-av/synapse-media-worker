@@ -43,6 +43,20 @@ media:
   # How long to wait for an in-progress async upload before returning 504.
   default_timeout: 20s
   max_timeout: 60s
+  # Fetch uncached remote media over federation instead of proxying to Synapse.
+  #
+  # This is the only feature that WRITES to Synapse's media store, so it needs
+  # the store mounted read-write. It is off by default, and any failure falls
+  # back to proxying exactly as before. Only remote_content/ and
+  # remote_thumbnail/ are ever written; media this server owns stays untouchable
+  # in code.
+  fetch_remote: false
+  max_concurrent_fetches: 4
+  fetch_timeout: 60s
+  # Must match homeserver.yaml's max_upload_size. Caps how large a remote file
+  # the worker will store.
+  max_upload_size: 52428800
+
   # Must match homeserver.yaml's enable_authenticated_media (default true).
   # When true, media rows with authenticated = true are hidden from the legacy
   # unauthenticated /_matrix/media endpoints.

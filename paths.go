@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -230,4 +231,35 @@ func (p *MediaPaths) URLCacheThumbnail(mediaID string, width, height int, conten
 		return "", err
 	}
 	return p.join("url_cache_thumbnails", a, b, rest, name)
+}
+
+// --- write paths -----------------------------------------------------------
+
+// writablePrefixes are the only directories the worker may write into.
+//
+// v0.1 could not write to the media store at all, and the read-only mount was
+// the guarantee. Fetching remote media requires giving that up, so the
+// guarantee is narrowed rather than dropped: media this server owns
+// (local_content, local_thumbnails) and the URL preview cache stay unwritable
+// in code, and only the remote cache -- which Synapse itself treats as
+// disposable and re-fetchable -- can be touched.
+var writablePrefixes = []string{"remote_content", "remote_thumbnail"}
+
+// WritablePath validates that a path produced by this package may be written
+// to. Every write must go through it.
+func (p *MediaPaths) WritablePath(path string) error {
+	clean := filepath.Clean(path)
+	if clean != p.base && !strings.HasPrefix(clean, p.base+string(filepath.Separator)) {
+		return fmt.Errorf("path %q is outside the media store", path)
+	}
+	rel, err := filepath.Rel(p.base, clean)
+	if err != nil {
+		return fmt.Errorf("path %q is not relative to the media store: %w", path, err)
+	}
+	top, _, _ := strings.Cut(rel, string(filepath.Separator))
+	if slices.Contains(writablePrefixes, top) {
+		return nil
+	}
+	return fmt.Errorf("refusing to write to %q: only %s may be written",
+		rel, strings.Join(writablePrefixes, " and "))
 }

@@ -61,6 +61,13 @@ var (
 		Help: "Proxied requests dispatched, by upstream and result.",
 	}, []string{"upstream", "result"})
 
+	// remoteFetches counts federated downloads the worker performed itself,
+	// which is the measure of how much work is no longer reaching Synapse.
+	remoteFetches = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "synapse_media_worker_remote_fetches_total",
+		Help: "Remote media the worker fetched over federation, by result.",
+	}, []string{"result"})
+
 	tokenCacheSize = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "synapse_media_worker_token_cache_entries",
 		Help: "Access token verdicts currently cached.",

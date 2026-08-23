@@ -314,3 +314,55 @@ func derefString(s *string) string {
 	}
 	return *s
 }
+
+// --- writes for fetched remote media ---------------------------------------
+
+// storeRemoteMediaQuery mirrors Synapse's store_cached_remote_media
+// (synapse/storage/databases/main/media_repository.py:734), column for column.
+//
+// Synapse uses a plain INSERT and lets the unique constraint raise, catching
+// IntegrityError and re-reading the winner. ON CONFLICT DO NOTHING expresses
+// the same intent without the round trip.
+//
+// It must never be DO UPDATE. A Synapse worker mid-request is holding the
+// filesystem_id it read earlier; changing it underneath makes that worker look
+// for a file that is no longer there, and orphans the old one.
+const storeRemoteMediaQuery = `
+INSERT INTO remote_media_cache (
+    media_origin, media_id, media_type, media_length, created_ts,
+    upload_name, filesystem_id, last_access_ts, authenticated, sha256
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (media_origin, media_id) DO NOTHING`
+
+// StoreRemoteMedia inserts a row for freshly fetched remote media. It reports
+// whether the row was ours; false means another writer won the race and the
+// caller must discard its file and use the existing row.
+//
+// created_ts and last_access_ts are both set to now, never to any timestamp
+// from the origin server: media retention and purge_media_cache delete on
+// last_access_ts, so a backdated value invites the media to be deleted almost
+// immediately.
+func (d *DB) StoreRemoteMedia(ctx context.Context, m *RemoteMedia, sha256hex string, authenticated bool) (bool, error) {
+	now := time.Now().UnixMilli()
+
+	var uploadName, sha *string
+	if m.UploadName != "" {
+		uploadName = &m.UploadName
+	}
+	if sha256hex != "" {
+		sha = &sha256hex
+	}
+	length := int64(0)
+	if m.Length != nil {
+		length = *m.Length
+	}
+
+	tag, err := d.pool.Exec(ctx, storeRemoteMediaQuery,
+		m.Origin, m.MediaID, m.MediaType, length, now,
+		uploadName, m.FilesystemID, now, authenticated, sha,
+	)
+	if err != nil {
+		return false, fmt.Errorf("storing remote media: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}

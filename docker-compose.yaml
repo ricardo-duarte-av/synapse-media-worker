@@ -27,9 +27,16 @@ services:
     restart: unless-stopped
 
     volumes:
-      # Synapse's media store, READ-ONLY. This mount option is what guarantees
-      # the worker never writes to it; the worker also refuses to start if its
-      # cache directory is nested inside the store.
+      # Synapse's media store.
+      #
+      # Leave this READ-ONLY (`:ro`) unless media.fetch_remote is enabled: the
+      # mount option is then the guarantee that the worker cannot write to it.
+      #
+      # With fetch_remote on, drop the `:ro` — the worker writes fetched media
+      # here. The guarantee narrows rather than disappearing: only
+      # remote_content/ and remote_thumbnail/ are writable in code, so
+      # local_content, local_thumbnails and url_cache stay untouchable, and the
+      # worker fails at startup if it cannot write.
       - ${SYNAPSE_MEDIA_STORE:-/share/aguiarvieira.pt/media_store}:/data/media_store:ro
 
       # The worker's own cache, for thumbnails it generates. Must be writable

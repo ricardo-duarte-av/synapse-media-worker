@@ -31,7 +31,10 @@ type Server struct {
 	auth        *TokenAuthenticator
 	downloadUp  *Proxy
 	thumbnailUp *Proxy
-	log         zerolog.Logger
+	// remote fetches uncached remote media itself. Nil when fetch_remote is
+	// off, in which case those requests are proxied to Synapse as before.
+	remote *RemoteFetcher
+	log    zerolog.Logger
 
 	// generating collapses concurrent generation of the same thumbnail, so a
 	// popular image is decoded once rather than once per waiting request.
@@ -133,8 +136,10 @@ func (s *Server) serveLocalDownload(w http.ResponseWriter, r *http.Request, medi
 func (s *Server) serveRemoteDownload(w http.ResponseWriter, r *http.Request, serverName, mediaID string, allowAuthenticated bool) {
 	media, err := s.db.GetRemoteMedia(r.Context(), serverName, mediaID)
 	if errors.Is(err, ErrNotFound) {
-		s.proxyDownload(w, r, "remote_not_cached")
-		return
+		media = s.fetchRemote(w, r, serverName, mediaID, "remote_not_cached", s.proxyDownload)
+		if media == nil {
+			return
+		}
 	} else if err != nil {
 		s.internalError(w, r, err, "querying remote media")
 		return
@@ -161,8 +166,9 @@ func (s *Server) serveRemoteDownload(w http.ResponseWriter, r *http.Request, ser
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		// Cached according to the database but absent on disk. Synapse can
-		// re-fetch it; the worker cannot.
+		// The row says it is cached but the bytes are gone. Re-fetching would
+		// hit our own row's unique constraint and change nothing, so this is
+		// Synapse's to repair.
 		s.proxyDownload(w, r, "remote_file_missing")
 		return
 	}
@@ -302,8 +308,10 @@ func (s *Server) serveLocalThumbnail(w http.ResponseWriter, r *http.Request, med
 func (s *Server) serveRemoteThumbnail(w http.ResponseWriter, r *http.Request, serverName, mediaID string, req ThumbnailRequest, allowAuthenticated bool) {
 	media, err := s.db.GetRemoteMedia(r.Context(), serverName, mediaID)
 	if errors.Is(err, ErrNotFound) {
-		s.proxyThumbnail(w, r, "remote_not_cached")
-		return
+		media = s.fetchRemote(w, r, serverName, mediaID, "remote_not_cached", s.proxyThumbnail)
+		if media == nil {
+			return
+		}
 	} else if err != nil {
 		s.internalError(w, r, err, "querying remote media")
 		return
@@ -579,6 +587,43 @@ func (s *Server) localMediaPath(media *LocalMedia) (string, error) {
 		return s.paths.URLCache(media.MediaID)
 	}
 	return s.paths.LocalMedia(media.MediaID)
+}
+
+// fetchRemote downloads uncached remote media, falling back to proxying if it
+// cannot. A nil return means the request has already been answered.
+//
+// Falling back rather than failing is deliberate: fetching is the one thing
+// this worker does that writes to Synapse's state, so any problem with it
+// should degrade to the behaviour that was there before, not to broken media.
+func (s *Server) fetchRemote(
+	w http.ResponseWriter, r *http.Request,
+	origin, mediaID, reason string,
+	fallback func(http.ResponseWriter, *http.Request, string),
+) *RemoteMedia {
+	if s.remote == nil {
+		fallback(w, r, reason)
+		return nil
+	}
+	media, err := s.remote.FetchAndStore(r.Context(), origin, mediaID)
+	if err != nil {
+		if errors.Is(err, ErrTooLarge) {
+			// Synapse answers 502 M_TOO_LARGE here rather than proxying, and
+			// proxying would only make Synapse download it too.
+			remoteFetches.WithLabelValues("too_large").Inc()
+			writeMatrixError(w, http.StatusBadGateway, "M_TOO_LARGE",
+				"Requested file is too large")
+			return nil
+		}
+		remoteFetches.WithLabelValues("failed").Inc()
+		s.log.Warn().Err(err).
+			Str("origin", origin).Str("media_id", mediaID).
+			Msg("Could not fetch remote media, falling back to Synapse")
+		fallback(w, r, "fetch_failed")
+		return nil
+	}
+	remoteFetches.WithLabelValues("fetched").Inc()
+	setOutcome(r.Context(), outcomeFetched)
+	return media
 }
 
 func (s *Server) proxyDownload(w http.ResponseWriter, r *http.Request, reason string) {

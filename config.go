@@ -75,6 +75,18 @@ type MediaConfig struct {
 	// an unbounded burst of distinct sizes could exhaust both. Defaults to the
 	// number of usable CPUs.
 	MaxConcurrentThumbnails int `yaml:"max_concurrent_thumbnails"`
+	// FetchRemote lets the worker download uncached remote media itself
+	// instead of proxying to Synapse. This is the one feature that writes to
+	// Synapse's media store, so it is off by default and any failure falls
+	// back to proxying.
+	FetchRemote bool `yaml:"fetch_remote"`
+	// MaxConcurrentFetches bounds simultaneous federated downloads.
+	MaxConcurrentFetches int `yaml:"max_concurrent_fetches"`
+	// FetchTimeout bounds a single federated download.
+	FetchTimeout time.Duration `yaml:"fetch_timeout"`
+	// MaxUploadSize mirrors Synapse's max_upload_size and caps how large a
+	// remote file the worker will store.
+	MaxUploadSize int64 `yaml:"max_upload_size"`
 	// EnableAuthenticatedMedia mirrors Synapse's enable_authenticated_media.
 	// When true, media rows with authenticated = true are hidden from the
 	// legacy unauthenticated /_matrix/media endpoints.
@@ -198,6 +210,9 @@ func defaultConfig() Config {
 		},
 		Media: MediaConfig{
 			MaxImagePixels:           100_000_000,
+			MaxConcurrentFetches:     4,
+			FetchTimeout:             60 * time.Second,
+			MaxUploadSize:            50 * 1024 * 1024,
 			DefaultTimeout:           20 * time.Second,
 			MaxTimeout:               60 * time.Second,
 			EnableAuthenticatedMedia: true,
@@ -256,6 +271,14 @@ func (c *Config) validate() error {
 	}
 	if c.Media.MaxImagePixels <= 0 {
 		return fmt.Errorf("media.max_image_pixels must be positive")
+	}
+	if c.Media.FetchRemote {
+		if c.Media.SigningKeyPath == "" {
+			return fmt.Errorf("media.signing_key_path is required when fetch_remote is on")
+		}
+		if c.Media.MaxUploadSize <= 0 {
+			return fmt.Errorf("media.max_upload_size must be positive when fetch_remote is on")
+		}
 	}
 	return nil
 }

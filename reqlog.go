@@ -28,6 +28,7 @@ const (
 	outcomeSynapseStore = "synapse_store" // a thumbnail Synapse had already generated
 	outcomeWorkerCache  = "worker_cache"  // a thumbnail this worker generated earlier
 	outcomeGenerated    = "generated"     // generated during this request
+	outcomeFetched      = "fetched"       // downloaded from the origin server just now
 	outcomeProxied      = "proxied"       // handed back to Synapse
 	outcomeNotFound     = "not_found"
 	outcomeUnauthorized = "unauthorized"

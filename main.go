@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -121,9 +122,28 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		log.Warn().Msg("No thumbnail upstream configured; animated and undecodable thumbnails will 404")
 	}
 
-	serverAuth, err := newFederationAuth(cfg, log)
+	serverAuth, fedClient, err := newFederationAuth(cfg, log)
 	if err != nil {
 		return err
+	}
+
+	if cfg.Media.FetchRemote {
+		// Writing into Synapse's media store is the one thing this worker
+		// does that can damage state it does not own, so fail at startup
+		// rather than at the first fetch.
+		if err := checkMediaStoreWritable(cfg.Media.StorePath); err != nil {
+			return err
+		}
+		fetcher := NewFetcher(fedClient, cfg.Media.MaxUploadSize,
+			cfg.Media.FetchTimeout, cfg.Media.MaxConcurrentFetches)
+		srv.remote = NewRemoteFetcher(db, srv.paths, fetcher,
+			cfg.Media.EnableAuthenticatedMedia, log)
+		log.Warn().
+			Int64("max_upload_size", cfg.Media.MaxUploadSize).
+			Int("max_concurrent", cfg.Media.MaxConcurrentFetches).
+			Msg("Fetching remote media directly; the media store is being written to")
+	} else {
+		log.Info().Msg("Remote media fetching is off; uncached remote media is proxied to Synapse")
 	}
 
 	if checkOnly {
@@ -258,13 +278,13 @@ func withCORSPreflight(next http.Handler) http.Handler {
 // fetching and caching the origin server's signing keys, checking their
 // self-signatures and verifying the request signature. Reimplementing any of
 // that would be a security liability for no gain.
-func newFederationAuth(cfg *Config, log zerolog.Logger) (*federation.ServerAuth, error) {
+func newFederationAuth(cfg *Config, log zerolog.Logger) (*federation.ServerAuth, *federation.Client, error) {
 	if cfg.Media.SigningKeyPath == "" {
-		return nil, errors.New("media.signing_key_path is required to serve federation media")
+		return nil, nil, errors.New("media.signing_key_path is required to serve federation media")
 	}
 	key, total, err := loadSigningKey(cfg.Media.SigningKeyPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.Info().Str("key_id", string(key.ID)).Int("keys_in_file", total).
 		Msg("Loaded signing key")
@@ -275,7 +295,26 @@ func newFederationAuth(cfg *Config, log zerolog.Logger) (*federation.ServerAuth,
 	client := federation.NewClient(cfg.ServerName, key, cache, exhttp.SensibleClientSettings)
 	auth := federation.NewServerAuth(client, cache,
 		func(federation.XMatrixAuth) string { return cfg.ServerName })
-	return auth, nil
+	return auth, client, nil
+}
+
+// checkMediaStoreWritable verifies the worker can actually write where it will
+// need to, by creating and removing a probe file under remote_content.
+func checkMediaStoreWritable(base string) error {
+	dir := filepath.Join(base, "remote_content")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("media store %q is not writable (fetch_remote is on; is it still mounted read-only?): %w", base, err)
+	}
+	probe, err := os.CreateTemp(dir, ".writable-probe-*")
+	if err != nil {
+		return fmt.Errorf("media store %q is not writable (fetch_remote is on; is it still mounted read-only?): %w", base, err)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("could not clean up the write probe %q: %w", name, err)
+	}
+	return nil
 }
 
 // checkMediaStore verifies the media store is present and readable.

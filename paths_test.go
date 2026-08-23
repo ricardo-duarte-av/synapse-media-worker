@@ -177,3 +177,71 @@ func TestAgainstObservedLiveLayout(t *testing.T) {
 		t.Errorf("url cache: got %q", got)
 	}
 }
+
+// The read-only mount is gone once the worker fetches media itself, so the
+// remaining guard is this one: media the server owns must stay untouchable.
+func TestWritablePathAllowsOnlyRemoteDirectories(t *testing.T) {
+	p := NewMediaPaths(testBase)
+
+	allowed := []string{
+		testBase + "/remote_content/ab/cd/efgh",
+		testBase + "/remote_thumbnail/example.com/ab/cd/efgh/96-96-image-png-crop",
+	}
+	for _, path := range allowed {
+		if err := p.WritablePath(path); err != nil {
+			t.Errorf("%q should be writable: %v", path, err)
+		}
+	}
+
+	refused := []string{
+		testBase + "/local_content/ab/cd/efgh",
+		testBase + "/local_thumbnails/ab/cd/efgh/96-96-image-png-crop",
+		testBase + "/url_cache/2026-01-01/abc",
+		testBase + "/url_cache_thumbnails/2026-01-01/abc/96-96-image-png-crop",
+		testBase,
+		"/etc/passwd",
+		testBase + "/../etc/passwd",
+	}
+	for _, path := range refused {
+		if err := p.WritablePath(path); err == nil {
+			t.Errorf("%q should NOT be writable", path)
+		}
+	}
+}
+
+// A prefix that merely starts with an allowed name is not an allowed directory.
+func TestWritablePathIsNotFooledByPrefixes(t *testing.T) {
+	p := NewMediaPaths(testBase)
+	for _, path := range []string{
+		testBase + "/remote_content_evil/ab/cd/ef",
+		testBase + "/remote_thumbnails/ab/cd/ef", // note: plural, not Synapse's name
+	} {
+		if err := p.WritablePath(path); err == nil {
+			t.Errorf("%q should NOT be writable", path)
+		}
+	}
+}
+
+// Every path the builder produces for remote media must be writable, and every
+// path it produces for local media must not be.
+func TestWritablePathAgreesWithTheBuilders(t *testing.T) {
+	p := NewMediaPaths(testBase)
+
+	remote, _ := p.RemoteMedia("example.com", "AbCdEfGhIjKlMnOpQrStUvWx")
+	if err := p.WritablePath(remote); err != nil {
+		t.Errorf("RemoteMedia path not writable: %v", err)
+	}
+	remoteThumb, _ := p.RemoteThumbnail("example.com", "AbCdEfGhIjKlMnOpQrStUvWx", 96, 96, "image/png", "crop")
+	if err := p.WritablePath(remoteThumb); err != nil {
+		t.Errorf("RemoteThumbnail path not writable: %v", err)
+	}
+
+	local, _ := p.LocalMedia("AbCdEfGhIjKlMnOpQrStUvWx")
+	if err := p.WritablePath(local); err == nil {
+		t.Error("LocalMedia path must not be writable")
+	}
+	urlCache, _ := p.URLCache("2026-03-21-yVDnyGLNTluDrjPE")
+	if err := p.WritablePath(urlCache); err == nil {
+		t.Error("URLCache path must not be writable")
+	}
+}

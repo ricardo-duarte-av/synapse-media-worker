@@ -16,12 +16,9 @@ the media store, and never implements an admin API. Anything it cannot answer is
 proxied back to Synapse, which keeps the worker small and every fallback
 correct.
 
-The one case where that costs something is remote media Synapse has not cached
-yet: the worker can only hand those to Synapse, so a federated fetch still runs
-in Python. Doing the fetch here instead would mean writing to the media store
-and inserting rows Synapse owns, which is a different and much less safe
-proposition than the read-only design this version rests on. It is the obvious
-next step, and not one to take casually.
+The one exception is `media.fetch_remote`, which lets the worker download
+uncached remote media itself rather than handing it to Synapse. It is off by
+default; see below.
 
 ## What it serves
 
@@ -94,6 +91,74 @@ Everything else is byte-for-byte identical, verified by the parity harness.
 - **Animated thumbnails are not generated.** `?animated=true` asks for WebP,
   which has no good pure-Go encoder, so those requests are proxied. On a real
   server they are well under 1% of stored thumbnails.
+
+## Fetching remote media (`fetch_remote`)
+
+Off by default. When on, remote media Synapse has not cached is downloaded over
+federation by the worker, written into the media store and inserted into
+`remote_media_cache`, instead of being proxied. It is the one feature that
+writes to state Synapse owns, so it is built to fail safe:
+
+- **Any failure falls back to proxying**, exactly as with the flag off. A bug
+  degrades to the previous behaviour rather than breaking media.
+- **Only `remote_content/` and `remote_thumbnail/` are writable**, enforced in
+  `paths.go` rather than by convention. `local_content`, `local_thumbnails` and
+  `url_cache` cannot be written even by a buggy path calculation.
+- The worker **fails at startup** if `fetch_remote` is on and the store is not
+  writable, rather than at the first fetch.
+
+Turning it on means dropping `:ro` from the media store mount in
+`docker-compose.yaml`.
+
+### Matching Synapse exactly
+
+The row has to be indistinguishable from one Synapse wrote, because Synapse
+keeps serving the same media:
+
+| Column | Value |
+|---|---|
+| `filesystem_id` | 24 random characters from `A-Za-z` — Synapse's `random_string(24)`, **no digits** |
+| `sha256` | lowercase hex of the raw bytes, hashed while streaming to disk |
+| `authenticated` | from `enable_authenticated_media`, which must match `homeserver.yaml` |
+| `created_ts`, `last_access_ts` | both now, never a timestamp from the origin |
+
+Three things that matter more than they look:
+
+**The file is written, fsynced and renamed into place before the row is
+inserted.** A row whose file is missing is worse than no row: Synapse finds
+nothing, falls through to its own download path, hits the unique constraint this
+row created, re-reads it, and returns media info whose file still is not there —
+a 404 loop that never self-heals.
+
+**`sha256` is not optional.** Synapse's admin quarantine resolves media by hash
+across the local and remote tables together, so a row stored without one is
+invisible to it: an admin quarantining an image would silently fail to
+quarantine this copy.
+
+**The insert is `ON CONFLICT DO NOTHING`, never `DO UPDATE`.** Losing the race
+means deleting our file and deferring to the winner's row, as Synapse does. A
+Synapse worker mid-request is holding the `filesystem_id` it read earlier;
+changing it underneath makes that worker look for a file that no longer exists,
+and orphans the old one.
+
+`last_access_ts` is set to now for the same reason Synapse does it: media
+retention and `purge_media_cache` delete on that column, so a backdated value
+invites the media to be deleted almost immediately.
+
+### What it deliberately does not do
+
+- **No thumbnails at fetch time.** Synapse pre-generates its default set on
+  download, but under `dynamic_thumbnails: true` those are written as
+  `image/jpeg`/`image/png` at post-aspect dimensions while clients request
+  `image/png` at the requested dimensions — so they almost never match and are
+  never served. Thumbnails stay on-demand. This does not cause Synapse to
+  re-download: storing the original is what prevents that.
+- **No per-IP byte ratelimiting** (`remote_media_download_per_second`).
+  `max_upload_size` is enforced, which is what protects the disk.
+- **No `prevent_media_downloads_from` or `federation_domain_whitelist`.** If you
+  rely on either, leave `fetch_remote` off until they are implemented.
+- **No spam-checker callbacks.** Synapse runs these post-download, pre-persist.
+  If you have a media spam-checker module, this bypasses it.
 
 ## Concurrency
 
