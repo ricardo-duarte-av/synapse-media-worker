@@ -172,7 +172,7 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		log.Info().Msg("Remote media fetching is off; uncached remote media is proxied to Synapse")
 	}
 
-	if cfg.Media.AcceptUploads {
+	if cfg.Media.UploadsAccepted() {
 		if err := checkMediaStoreWritable(cfg.Media.StorePath); err != nil {
 			return err
 		}
@@ -188,6 +188,20 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 			log.Warn().Msg("upload_thumbnails is off and Synapse has dynamic_thumbnails off, " +
 				"so uploaded media will have no thumbnails for Synapse to select from")
 		}
+		if limits := cfg.Media.UploadLimits(); len(limits) > 0 {
+			log.Info().Str("limits", describeUploadLimits(limits)).
+				Msg("Enforcing Synapse's media_upload_limits on uploads")
+		} else if cfg.SynapseConfig == "" {
+			// Without homeserver.yaml there is no way to know whether Synapse
+			// has quotas, and enforcing none looks exactly like having none.
+			log.Warn().Msg("accept_uploads is on with no synapse_config, so Synapse's " +
+				"media_upload_limits cannot be read; no per-user upload limits are enforced")
+		}
+	} else if cfg.Media.AcceptUploads {
+		// accept_uploads is on but the limits cannot be known here.
+		log.Warn().Msg("Uploads are proxied to Synapse despite accept_uploads: " +
+			"Synapse loads modules that may set per-user upload limits this worker " +
+			"cannot evaluate. Set media.module_upload_limits: ignore to accept them anyway")
 	} else {
 		log.Info().Msg("Uploads are proxied to Synapse")
 	}
@@ -238,7 +252,7 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		Str("server_name", cfg.ServerName).
 		Msg("Media worker ready")
 
-	if cfg.Media.AcceptUploads {
+	if cfg.Media.UploadsAccepted() {
 		// Deliberately after the listener is up and in the background: this
 		// walks every file under local_content and local_thumbnails, which on
 		// a large store takes minutes. Doing it before binding the socket meant

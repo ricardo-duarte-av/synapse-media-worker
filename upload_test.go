@@ -277,6 +277,7 @@ func TestUploadMetricLabelsAreConsistent(t *testing.T) {
 		uploadResultStored: true, uploadResultReserved: true, uploadResultTooLarge: true,
 		uploadResultLimited: true, uploadResultForbidden: true, uploadResultNotFound: true,
 		uploadResultConflict: true, uploadResultFailed: true, uploadResultProxied: true,
+		uploadResultOverQuota: true,
 	}
 
 	src, err := os.ReadFile("upload.go")
@@ -377,6 +378,8 @@ func constValue(ident string) string {
 		return uploadResultTooLarge
 	case "uploadResultLimited":
 		return uploadResultLimited
+	case "uploadResultOverQuota":
+		return uploadResultOverQuota
 	case "uploadResultForbidden":
 		return uploadResultForbidden
 	case "uploadResultNotFound":

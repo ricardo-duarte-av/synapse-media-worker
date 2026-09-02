@@ -32,6 +32,7 @@ const (
 	outcomeUploaded     = "uploaded"      // accepted from a local user and stored
 	outcomeReserved     = "reserved"      // an async media ID was created
 	outcomeLimited      = "rate_limited"  // refused, too many pending uploads
+	outcomeOverQuota    = "over_quota"    // refused, over the user's upload limit
 	outcomeTooLarge     = "too_large"     // refused, over max_upload_size
 	outcomeProxied      = "proxied"       // handed back to Synapse
 	outcomeNotFound     = "not_found"

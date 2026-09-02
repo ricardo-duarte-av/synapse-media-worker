@@ -57,6 +57,19 @@ func writeMatrixError(w http.ResponseWriter, status int, errcode, message string
 	_ = json.NewEncoder(w).Encode(MatrixError{ErrCode: errcode, Error: message})
 }
 
+// writeMatrixErrorFields writes an error carrying the extra top-level fields
+// some Matrix errors add, as Synapse's cs_error does with additional_fields.
+func writeMatrixErrorFields(w http.ResponseWriter, status int, errcode, message string, extra map[string]any) {
+	body := map[string]any{"errcode": errcode, "error": message}
+	for k, v := range extra {
+		body[k] = v
+	}
+	setCORSHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 func respondNotFound(w http.ResponseWriter, path string) {
 	writeMatrixError(w, http.StatusNotFound, "M_NOT_FOUND", "Not found '"+path+"'")
 }

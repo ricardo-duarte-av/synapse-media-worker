@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -147,10 +148,38 @@ type MediaConfig struct {
 	// the two will disagree. Derived when unset.
 	DynamicThumbnails *bool `yaml:"dynamic_thumbnails"`
 
+	// ModuleUploadLimits decides what to do when homeserver.yaml loads
+	// modules, which may replace the per-user upload limits below or veto an
+	// upload by size outright. "proxy" hands uploads to Synapse, which can run
+	// the modules; "ignore" accepts them here and applies only the limits read
+	// from config.
+	ModuleUploadLimits string `yaml:"module_upload_limits"`
+
 	// synapseModules records that homeserver.yaml loads modules, which may
-	// override /media/config per user. Derived, never configured: it has no
-	// yaml tag and is unexported so the strict decoder cannot see it.
+	// override /media/config and the upload limits per user. Derived, never
+	// configured: it has no yaml tag and is unexported so the strict decoder
+	// cannot see it.
 	synapseModules bool
+	// uploadLimits are Synapse's media_upload_limits, sorted longest window
+	// first as Synapse sorts them. Derived: transcribing a list of sizes and
+	// durations by hand is exactly the drift synapse_config exists to avoid.
+	uploadLimits []MediaUploadLimit
+}
+
+// MediaUploadLimit caps how many bytes a user may upload in a rolling window,
+// mirroring Synapse's MediaUploadLimit.
+type MediaUploadLimit struct {
+	// MaxBytes is the ceiling for the window.
+	MaxBytes int64
+	// Window is how far back usage is summed.
+	Window time.Duration
+	// InfoURI is returned with the M_USER_LIMIT_EXCEEDED error. Synapse falls
+	// back to a page it serves itself, so this is never empty by the time it
+	// reaches a response.
+	InfoURI string
+	// CanUpgrade tells the client the limit can be raised by upgrading, and is
+	// omitted from the error when false.
+	CanUpgrade bool
 }
 
 type CacheConfig struct {
@@ -308,6 +337,41 @@ func (m MediaConfig) AuthenticatedMedia() bool {
 	return m.EnableAuthenticatedMedia == nil || *m.EnableAuthenticatedMedia
 }
 
+// Module upload limit policies.
+const (
+	moduleUploadLimitsProxy  = "proxy"
+	moduleUploadLimitsIgnore = "ignore"
+)
+
+// UploadLimits returns the per-user upload quotas read from Synapse's config.
+func (m MediaConfig) UploadLimits() []MediaUploadLimit {
+	return m.uploadLimits
+}
+
+// UploadsAccepted reports whether this worker should serve uploads itself.
+//
+// accept_uploads is the operator's intent; this is what is actually safe. A
+// module may replace the upload limits per user or refuse a size outright, and
+// the worker cannot run Synapse's modules, so with modules loaded the default
+// is to leave uploads to Synapse entirely rather than enforce limits that may
+// not be this user's.
+func (m MediaConfig) UploadsAccepted() bool {
+	if !m.AcceptUploads {
+		return false
+	}
+	return !(m.synapseModules && m.ModuleUploadLimitsPolicy() == moduleUploadLimitsProxy)
+}
+
+// ModuleUploadLimitsPolicy returns the effective policy, defaulting to proxy:
+// deferring is always correct, and enforcing a limit that a module would have
+// overridden is not.
+func (m MediaConfig) ModuleUploadLimitsPolicy() string {
+	if m.ModuleUploadLimits == "" {
+		return moduleUploadLimitsProxy
+	}
+	return m.ModuleUploadLimits
+}
+
 // ProxyMediaConfig reports whether /media/config must be handed to Synapse
 // rather than answered here, because a loaded module may replace the response
 // for some users.
@@ -408,6 +472,12 @@ func (c *Config) validate() error {
 		// declares the intent to write.
 		return fmt.Errorf("media.write_through_thumbnails requires media.fetch_remote to be enabled")
 	}
+	switch c.Media.ModuleUploadLimits {
+	case "", moduleUploadLimitsProxy, moduleUploadLimitsIgnore:
+	default:
+		return fmt.Errorf("media.module_upload_limits must be %q or %q, got %q",
+			moduleUploadLimitsProxy, moduleUploadLimitsIgnore, c.Media.ModuleUploadLimits)
+	}
 	switch c.Media.UploadThumbnails {
 	case "", uploadThumbnailsNone, uploadThumbnailsSynapse:
 	default:
@@ -479,9 +549,13 @@ func (c *Config) deriveFromSynapse() error {
 		c.Media.UnusedExpirationTime = d
 		c.derived.note("media.unused_expiration_time", d.String())
 	}
-	if len(hs.MediaUploadLimits) > 0 && c.Media.AcceptUploads {
-		c.derived.warn("media_upload_limits is configured in Synapse but this worker " +
-			"does not implement per-user quotas; accept_uploads would bypass them")
+	limits, err := parseMediaUploadLimits(hs)
+	if err != nil {
+		return fmt.Errorf("media_upload_limits in %s: %w", c.SynapseConfig, err)
+	}
+	c.Media.uploadLimits = limits
+	if len(limits) > 0 {
+		c.derived.note("media.upload_limits", describeUploadLimits(limits))
 	}
 	if c.Media.EnableAuthenticatedMedia == nil && hs.EnableAuthenticatedMedia != nil {
 		c.Media.EnableAuthenticatedMedia = hs.EnableAuthenticatedMedia
@@ -520,12 +594,23 @@ func (c *Config) deriveFromSynapse() error {
 
 	if len(hs.Modules) > 0 {
 		// Sits with the other "Synapse does something this worker cannot"
-		// warnings, but this one is already handled rather than merely
-		// reported: the endpoint goes back to Synapse.
+		// warnings, but these are handled rather than merely reported.
 		c.Media.synapseModules = true
 		c.derived.warn("modules are configured in Synapse and one may override " +
 			"/media/config per user; that endpoint will be passed through rather " +
 			"than answered here")
+		if c.Media.AcceptUploads {
+			if c.Media.ModuleUploadLimitsPolicy() == moduleUploadLimitsProxy {
+				c.derived.warn("modules are configured in Synapse and one may replace " +
+					"the media upload limits per user; uploads will be proxied to Synapse " +
+					"rather than accepted here (media.module_upload_limits: ignore " +
+					"accepts them and applies only the limits from config)")
+			} else {
+				c.derived.warn("media.module_upload_limits is \"ignore\" and Synapse loads " +
+					"modules; uploads are accepted here with only the media_upload_limits " +
+					"from config, so any per-user limit a module imposes is bypassed")
+			}
+		}
 	}
 
 	if len(hs.StorageProviders) > 0 {
@@ -541,6 +626,53 @@ func (c *Config) deriveFromSynapse() error {
 			"thumbnail; this worker only does exact matching and the two will disagree")
 	}
 	return nil
+}
+
+// parseMediaUploadLimits converts Synapse's media_upload_limits into the form
+// the upload path checks against, in the order Synapse checks them.
+func parseMediaUploadLimits(hs *SynapseConfig) ([]MediaUploadLimit, error) {
+	if len(hs.MediaUploadLimits) == 0 {
+		return nil, nil
+	}
+	// The fallback is a page Synapse serves. Synapse substitutes it whenever a
+	// limit carries no info_uri of its own, so no error can go out without one.
+	fallbackURI := hs.PublicBaseurlOrDefault() + "_synapse/client/media_upload_limit_exceeded"
+
+	limits := make([]MediaUploadLimit, 0, len(hs.MediaUploadLimits))
+	for i, raw := range hs.MediaUploadLimits {
+		maxBytes, err := parseSynapseSize(raw.MaxSize)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: max_size: %w", i, err)
+		}
+		window, err := parseSynapseDuration(raw.TimePeriod)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: time_period: %w", i, err)
+		}
+		infoURI := raw.InfoURI
+		if infoURI == "" {
+			infoURI = fallbackURI
+		}
+		limits = append(limits, MediaUploadLimit{
+			MaxBytes: maxBytes, Window: window,
+			InfoURI: infoURI, CanUpgrade: raw.CanUpgrade,
+		})
+	}
+	// Synapse sorts descending by time period and relies on that order to skip
+	// the smaller windows once a larger one has been shown to be under its
+	// limit. Reproduce the order, or a different limit reports the error.
+	sort.SliceStable(limits, func(i, j int) bool {
+		return limits[i].Window > limits[j].Window
+	})
+	return limits, nil
+}
+
+// describeUploadLimits renders the limits for the startup log.
+func describeUploadLimits(limits []MediaUploadLimit) string {
+	parts := make([]string, 0, len(limits))
+	for _, l := range limits {
+		parts = append(parts, fmt.Sprintf("%d bytes/%s", l.MaxBytes, l.Window))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // derivedNotes records what was taken from Synapse's config, for logging once

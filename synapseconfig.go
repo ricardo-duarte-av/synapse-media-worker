@@ -36,9 +36,18 @@ type SynapseConfig struct {
 	MaxUploadSize  any `yaml:"max_upload_size"`
 	MaxImagePixels any `yaml:"max_image_pixels"`
 
-	MaxPendingMediaUploads *int  `yaml:"max_pending_media_uploads"`
-	UnusedExpirationTime   any   `yaml:"unused_expiration_time"`
-	MediaUploadLimits      []any `yaml:"media_upload_limits"`
+	MaxPendingMediaUploads *int `yaml:"max_pending_media_uploads"`
+	UnusedExpirationTime   any  `yaml:"unused_expiration_time"`
+
+	// MediaUploadLimits caps how much a user may upload in a rolling window.
+	// Synapse enforces these on every upload, so a worker that accepts uploads
+	// must enforce them too or they are simply not there.
+	MediaUploadLimits []SynapseMediaUploadLimit `yaml:"media_upload_limits"`
+
+	// PublicBaseurl is read only to build the info_uri a limit falls back to,
+	// which is a page Synapse itself serves. Synapse defaults it to
+	// https://<server_name>/ and forces a trailing slash.
+	PublicBaseurl string `yaml:"public_baseurl"`
 
 	DynamicThumbnails        *bool `yaml:"dynamic_thumbnails"`
 	EnableAuthenticatedMedia *bool `yaml:"enable_authenticated_media"`
@@ -68,6 +77,17 @@ type SynapseConfig struct {
 	Modules []any `yaml:"modules"`
 }
 
+// SynapseMediaUploadLimit is one media_upload_limits entry. The spellings are
+// Synapse's config spellings, which are not the ones its MediaUploadLimit
+// object uses: max_size becomes max_bytes and time_period becomes
+// time_period_ms.
+type SynapseMediaUploadLimit struct {
+	MaxSize    any    `yaml:"max_size"`
+	TimePeriod any    `yaml:"time_period"`
+	InfoURI    string `yaml:"info_uri"`
+	CanUpgrade bool   `yaml:"can_upgrade"`
+}
+
 // LoadSynapseConfig reads and parses homeserver.yaml.
 func LoadSynapseConfig(path string) (*SynapseConfig, error) {
 	raw, err := os.ReadFile(path)
@@ -81,6 +101,18 @@ func LoadSynapseConfig(path string) (*SynapseConfig, error) {
 		return nil, fmt.Errorf("parsing Synapse config: %w", err)
 	}
 	return &cfg, nil
+}
+
+// PublicBaseurlOrDefault reproduces Synapse's public_baseurl handling: it
+// defaults to https://<server_name>/ and always ends in a slash.
+func (c *SynapseConfig) PublicBaseurlOrDefault() string {
+	if c.PublicBaseurl == "" {
+		return "https://" + c.ServerName + "/"
+	}
+	if strings.HasSuffix(c.PublicBaseurl, "/") {
+		return c.PublicBaseurl
+	}
+	return c.PublicBaseurl + "/"
 }
 
 // parseSynapseSize reproduces Synapse's Config.parse_size

@@ -493,6 +493,25 @@ func (d *DB) CountPendingMedia(ctx context.Context, userID string, notBefore int
 	return count, oldest, nil
 }
 
+// uploadedSizeForUserQuery mirrors get_media_uploaded_size_for_user, the sum
+// media_upload_limits is enforced against.
+//
+// media_length is NULL on a reserved but not-yet-uploaded media ID; SUM skips
+// those, so a user cannot hold quota by reserving IDs they never fill.
+const uploadedSizeForUserQuery = `
+SELECT COALESCE(SUM(media_length), 0)
+  FROM local_media_repository
+ WHERE user_id = $1 AND created_ts > $2`
+
+// UploadedSizeForUser returns how many bytes a user has uploaded since notBefore.
+func (d *DB) UploadedSizeForUser(ctx context.Context, userID string, notBefore int64) (int64, error) {
+	var total int64
+	if err := d.pool.QueryRow(ctx, uploadedSizeForUserQuery, userID, notBefore).Scan(&total); err != nil {
+		return 0, fmt.Errorf("summing uploaded media: %w", err)
+	}
+	return total, nil
+}
+
 // isHashQuarantinedQuery mirrors get_is_hash_quarantined: media is quarantined
 // by content hash across both the local and remote tables together.
 const isHashQuarantinedQuery = `

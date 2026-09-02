@@ -86,6 +86,24 @@ Thumbnails:
 - Synapse serves a thumbnail using the **database's** `thumbnail_length` as the
   Content-Length. A row that disagrees with the file truncates the response.
 
+Upload limits:
+
+- `media_upload_limits` is enforced on **both** upload paths: sync and async go
+  through the same `create_or_update_content` upstream.
+- The limits are sorted **longest window first**, and Synapse carries the usage
+  figure between iterations — a longer window's total is an over-count for a
+  shorter one, so being under the ceiling settles both. Sorting differently
+  changes which limit's `info_uri` the user is told about.
+- The check runs after the body is read and before the row is written, which is
+  where Synapse runs it. Refusing before reading the body would answer a client
+  that is still sending, which reads as a broken connection, not a 403.
+- Over quota is `403 M_USER_LIMIT_EXCEEDED`, and `can_upgrade` is **omitted**
+  rather than `false` when unset. A limit with no `info_uri` gets Synapse's own
+  fallback page, built from `public_baseurl` (which defaults to
+  `https://<server_name>/` and is forced to end in a slash).
+- The usage sum ignores `media_length IS NULL`, so reserved-but-unfilled async
+  media IDs hold no quota.
+
 Writing remote media:
 
 - **The file must be fsynced and renamed into place before the row exists.** A

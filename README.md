@@ -209,6 +209,10 @@ invites the media to be deleted almost immediately.
   rely on either, leave `fetch_remote` off until they are implemented.
 - **No spam-checker callbacks.** Synapse runs these post-download, pre-persist.
   If you have a media spam-checker module, this bypasses it.
+- **No module callbacks on the media repository.** `media_upload_limits` from
+  config *is* enforced, but the module hooks that override it per user are not;
+  see [`module_upload_limits`](#module_upload_limits). `get_media_config_for_user`
+  is handled the same way — `/media/config` is proxied when modules are loaded.
 
 ### `write_through_thumbnails`
 
@@ -281,6 +285,19 @@ quarantined content. If the check itself errors the upload fails rather than
 guessing — failing open would let the content through, and failing closed would
 hand back a `200` for media that is silently unusable.
 
+**Per-user upload limits are enforced.** Synapse's `media_upload_limits` — a
+list of `{max_size, time_period}` quotas — is read from `homeserver.yaml` and
+applied to every upload, using the same rolling sum over
+`local_media_repository.media_length` that Synapse uses. Over quota is
+`403 M_USER_LIMIT_EXCEEDED` carrying `info_uri` (falling back to the page
+Synapse serves at `/_synapse/client/media_upload_limit_exceeded`) and
+`can_upgrade`. The limits are evaluated longest window first, and the usage
+figure is carried between them exactly as Synapse carries it, so the limit a
+user is told about is the one Synapse would have named. The check runs where
+Synapse runs it — after the body is read, before the row exists — because
+answering earlier would cut the client off mid-upload rather than answering it.
+See `module_upload_limits` below for the part that cannot be reproduced.
+
 **Async completion needs no lock.** Synapse holds a cross-worker lock across the
 whole PUT because its completing UPDATE is unconditional. This worker adds
 `AND media_length IS NULL` instead, so a second writer affects zero rows and is
@@ -288,6 +305,20 @@ told `409 M_CANNOT_OVERWRITE_MEDIA` — the same status, from the database, with
 no lock table or renewal to keep in sync. This requires that **all** PUTs route
 to the worker: a Synapse worker handling one concurrently could still clobber it
 with its unconditional UPDATE.
+
+### `module_upload_limits`
+
+A Synapse module can register `get_media_upload_limits_for_user`, replacing the
+configured limits per user, or `is_user_allowed_to_upload_media_of_size`, which
+vetoes an upload by size outright. Neither can run here.
+
+So when `homeserver.yaml` loads **any** `modules`, the default
+(`module_upload_limits: proxy`) is to hand uploads back to Synapse — the same
+place they go with `accept_uploads` off. Set it to `ignore` to accept them here
+anyway, applying only the limits from config; that is the right choice when your
+modules have nothing to do with media, and the wrong one if any of them sets
+quotas. Either way the worker says which at startup. With no modules configured
+the setting does nothing.
 
 ### No thumbnails at upload
 

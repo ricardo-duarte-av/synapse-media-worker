@@ -109,6 +109,20 @@ media:
   # worker will store, and is the value /media/config reports to clients.
   # max_upload_size: 52428800
 
+  # Synapse's media_upload_limits -- the per-user upload quotas -- are read from
+  # synapse_config and enforced on every upload accepted here. They cannot be
+  # set below: transcribing a list of sizes and windows by hand is exactly the
+  # drift synapse_config exists to prevent.
+  #
+  # A Synapse module can replace those limits per user, or refuse an upload by
+  # size outright, and this worker cannot run Synapse's modules. So when
+  # homeserver.yaml loads any modules:
+  #   proxy  (default) -- uploads go to Synapse, which can run them
+  #   ignore           -- accept uploads here, applying only the limits from
+  #                       config; any limit a module imposes is bypassed
+  # With no modules configured this setting does nothing.
+  module_upload_limits: proxy
+
   # Derived from synapse_config when unset; Synapse defaults it to true. When
   # true, media rows with authenticated = true are hidden from the legacy
   # unauthenticated /_matrix/media endpoints.

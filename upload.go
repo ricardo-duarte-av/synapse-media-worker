@@ -42,6 +42,7 @@ const (
 	uploadResultReserved  = "reserved"
 	uploadResultTooLarge  = "too_large"
 	uploadResultLimited   = "limited"
+	uploadResultOverQuota = "over_quota"
 	uploadResultForbidden = "forbidden"
 	uploadResultNotFound  = "not_found"
 	uploadResultConflict  = "conflict"
@@ -115,6 +116,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		stored.discard()
 		s.uploadFailed(w, r, uploadEndpointSync, err, "checking quarantined hashes")
+		return
+	}
+	if !s.withinUploadLimits(w, r, uploadEndpointSync, user, stored) {
 		return
 	}
 	// Nobody else can hold this media ID, so the file may land before the row.
@@ -257,6 +261,9 @@ func (s *Server) handleAsyncUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		stored.discard()
 		s.uploadFailed(w, r, uploadEndpointAsync, err, "checking quarantined hashes")
+		return
+	}
+	if !s.withinUploadLimits(w, r, uploadEndpointAsync, user, stored) {
 		return
 	}
 
@@ -469,6 +476,86 @@ func (u *Uploader) store(r *http.Request, mediaID, mediaType string, declared in
 		path: path, tmpPath: tmpName,
 		length: written, sha256: hex.EncodeToString(hasher.Sum(nil)),
 	}, nil
+}
+
+// withinUploadLimits applies Synapse's media_upload_limits to an upload whose
+// bytes are on disk but not yet installed. It writes the error response and
+// discards the file when the user is over quota.
+//
+// The position in the flow is Synapse's: the body has been read and hashed,
+// and the row has not been written. Checking earlier would answer before the
+// client finished sending, which turns a clean 403 into a broken pipe.
+func (s *Server) withinUploadLimits(w http.ResponseWriter, r *http.Request, endpoint, user string, stored *storedUpload) bool {
+	limit, err := s.uploader.exceededLimit(r.Context(), user, stored.length)
+	if err != nil {
+		stored.discard()
+		s.uploadFailed(w, r, endpoint, err, "checking media upload limits")
+		return false
+	}
+	if limit == nil {
+		return true
+	}
+	stored.discard()
+	setOutcome(r.Context(), outcomeOverQuota)
+	uploadsTotal.WithLabelValues(endpoint, uploadResultOverQuota).Inc()
+	s.log.Info().Str("user", user).Int64("bytes", stored.length).
+		Int64("max_bytes", limit.MaxBytes).Stringer("window", limit.Window).
+		Msg("Refused an upload over the user's media upload limit")
+	writeUserLimitExceeded(w, *limit)
+	return false
+}
+
+// exceededLimit reports the first limit this upload would breach, or nil.
+//
+// The evaluation order is Synapse's and is not incidental. Limits are sorted
+// longest window first, and the usage figure is carried between iterations:
+// once a longer window is comfortably under a shorter window's ceiling, the
+// shorter window cannot be over it either, so the query is skipped. Sorting
+// differently would report a different limit -- and a different info_uri --
+// than Synapse would for the same upload.
+func (u *Uploader) exceededLimit(ctx context.Context, userID string, length int64) (*MediaUploadLimit, error) {
+	return evaluateUploadLimits(u.cfg.Media.UploadLimits(), length, time.Now(),
+		func(notBefore int64) (int64, error) {
+			return u.db.UploadedSizeForUser(ctx, userID, notBefore)
+		})
+}
+
+// evaluateUploadLimits is the arithmetic on its own, so the order and the
+// skipped queries can be tested without a database.
+//
+// usage is asked for the total uploaded since a timestamp. Note that the
+// figure is carried across iterations unchanged: it was measured over a longer
+// window than the limit now being tested, so it can only over-count, and an
+// over-count that is still under the ceiling proves the shorter window is too.
+func evaluateUploadLimits(limits []MediaUploadLimit, length int64, now time.Time, usage func(notBefore int64) (int64, error)) (*MediaUploadLimit, error) {
+	var used int64
+	measured := false
+	for i := range limits {
+		limit := limits[i]
+		if !measured || used+length > limit.MaxBytes {
+			total, err := usage(now.Add(-limit.Window).UnixMilli())
+			if err != nil {
+				return nil, err
+			}
+			used = total
+			measured = true
+		}
+		if used+length > limit.MaxBytes {
+			return &limit, nil
+		}
+	}
+	return nil, nil
+}
+
+// writeUserLimitExceeded is Synapse's UserLimitExceededError: 403, with the
+// info_uri a client can send the user to, and can_upgrade only when true.
+func writeUserLimitExceeded(w http.ResponseWriter, limit MediaUploadLimit) {
+	extra := map[string]any{"info_uri": limit.InfoURI}
+	if limit.CanUpgrade {
+		extra["can_upgrade"] = true
+	}
+	writeMatrixErrorFields(w, http.StatusForbidden, "M_USER_LIMIT_EXCEEDED",
+		"Media upload limit exceeded", extra)
 }
 
 // errUploadTooLarge marks a body that exceeded the limit while being read.

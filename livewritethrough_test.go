@@ -152,3 +152,30 @@ func TestLiveWriteThroughAgainstRealSchema(t *testing.T) {
 		t.Errorf("rewrite created %d rows, want 1", len(rows))
 	}
 }
+
+// The media_upload_limits sum is a plain SELECT, so it can be validated against
+// the real schema without writing anything: a column Synapse renamed would
+// otherwise only surface as a failed upload in production.
+//
+// Skipped unless SMW_LIVE_DB is set.
+func TestLiveUploadedSizeQueryAgainstRealSchema(t *testing.T) {
+	dbURI := os.Getenv("SMW_LIVE_DB")
+	if dbURI == "" {
+		t.Skip("set SMW_LIVE_DB to run")
+	}
+	ctx := context.Background()
+	db, err := NewDB(ctx, DatabaseConfig{URI: dbURI, MaxConns: 2}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// A user that cannot exist: example.invalid is reserved by RFC 2606.
+	total, err := db.UploadedSizeForUser(ctx, "@nobody:example.invalid", 0)
+	if err != nil {
+		t.Fatalf("summing uploaded media: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d for a user that cannot exist, want 0", total)
+	}
+}
