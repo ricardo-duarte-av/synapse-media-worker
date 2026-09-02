@@ -60,10 +60,9 @@ func TestPassthroughForwardsUnimplementedEndpoints(t *testing.T) {
 
 	srv := newPassthroughServer(t, upstream.URL)
 	for _, path := range []string{
-		"/_matrix/client/v1/media/config",
 		"/_matrix/client/v1/media/preview_url?url=x",
 		"/_matrix/media/v3/preview_url?url=x",
-		"/_matrix/media/v3/config",
+		"/_matrix/client/v1/media/something_a_future_synapse_adds",
 	} {
 		got = ""
 		w := httptest.NewRecorder()
@@ -89,14 +88,21 @@ func TestPassthroughDoesNotShadowOwnEndpoints(t *testing.T) {
 	srv := newPassthroughServer(t, upstream.URL)
 	// No token, so the worker's own handler answers 401 rather than the
 	// request being forwarded.
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
-		"/_matrix/client/v1/media/download/example.com/abc", nil))
-	if reached {
-		t.Error("a download was forwarded instead of being handled here")
-	}
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401 from the worker's own handler", w.Code)
+	for _, path := range []string{
+		"/_matrix/client/v1/media/download/example.com/abc",
+		"/_matrix/client/v1/media/config",
+		"/_matrix/media/v3/config",
+	} {
+		reached = false
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if reached {
+			t.Errorf("%s was forwarded instead of being handled here", path)
+		}
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: status = %d, want 401 from the worker's own handler",
+				path, w.Code)
+		}
 	}
 }
 
@@ -164,6 +170,10 @@ func newPassthroughServer(t *testing.T, upstreamURL string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /_matrix/client/v1/media/download/{serverName}/{mediaId}",
 		http.HandlerFunc(srv.handleClientDownload))
+	mux.Handle("GET /_matrix/client/v1/media/config",
+		http.HandlerFunc(srv.handleMediaConfig))
+	mux.Handle("GET /_matrix/media/{version}/config",
+		http.HandlerFunc(srv.handleLegacyMediaConfig))
 	for _, prefix := range mediaPrefixes {
 		mux.Handle(prefix, http.HandlerFunc(srv.handlePassthrough))
 	}

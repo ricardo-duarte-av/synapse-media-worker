@@ -40,8 +40,8 @@ type Server struct {
 	// uploadUp is the Synapse upload worker to proxy to.
 	uploadUp *Proxy
 	// passthroughUp receives requests on the media surface that this worker
-	// does not implement: /media/config, preview_url, the admin APIs, and
-	// anything a future Synapse adds.
+	// does not implement: preview_url, the admin APIs, and anything a future
+	// Synapse adds.
 	passthroughUp *Proxy
 	log           zerolog.Logger
 

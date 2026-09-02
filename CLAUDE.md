@@ -59,6 +59,13 @@ Serving:
   `name=None` — that only suppresses the URL-path override.
 - Authenticated media makes every cross-origin browser request a CORS
   preflight. Answer `OPTIONS` or web clients on other origins see nothing.
+- `/media/config` is one servlet under two path families, and **both
+  authenticate** — including the `/_matrix/media` spelling, which is otherwise
+  the unauthenticated family. Its body is canonical JSON: no spaces, no
+  trailing newline, and `Cache-Control: no-cache, no-store, must-revalidate`
+  from `respond_with_json`. A module can replace it per user via
+  `get_media_config_for_user`, so the worker proxies it whenever
+  `homeserver.yaml` loads any `modules` at all.
 - Wrapping the `ResponseWriter` costs sendfile unless the wrapper forwards
   `ReadFrom`. Nothing fails; downloads just quietly get slower.
 

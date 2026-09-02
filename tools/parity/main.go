@@ -112,7 +112,7 @@ func main() {
 	goClient, goBase := newGoClient()
 	synClient, synBase := newSynapseClient()
 
-	var fedDown, fedThumb, cliDown, cliThumb, cond, rng result
+	var fedDown, fedThumb, cliDown, cliThumb, cond, rng, mcfg result
 
 	if doFederation {
 		for _, m := range local {
@@ -123,6 +123,7 @@ func main() {
 		}
 	}
 	if doClient {
+		compareMediaConfig(goClient, goBase, synClient, synBase, token, &mcfg)
 		all := append(append([]mediaRef{}, local...), remote...)
 		for _, m := range all {
 			compareClientDownload(goClient, goBase, synClient, synBase, m, token, &cliDown)
@@ -146,11 +147,12 @@ func main() {
 	report("federation thumbnails", fedThumb)
 	report("client downloads", cliDown)
 	report("client thumbnails", cliThumb)
+	report("media config", mcfg)
 	report("if-none-match", cond)
 	report("range", rng)
 
 	total := fedDown.mismatch + fedThumb.mismatch + cliDown.mismatch +
-		cliThumb.mismatch + cond.mismatch + rng.mismatch
+		cliThumb.mismatch + cond.mismatch + rng.mismatch + mcfg.mismatch
 	if total > 0 {
 		os.Exit(1)
 	}

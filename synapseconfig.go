@@ -58,6 +58,14 @@ type SynapseConfig struct {
 	// worker cannot fetch from an object store or honour a blocklist yet.
 	StorageProviders          []any    `yaml:"media_storage_providers"`
 	PreventMediaDownloadsFrom []string `yaml:"prevent_media_downloads_from"`
+
+	// Modules is read only to know whether any exist. A module can register a
+	// get_media_config_for_user callback and replace the /media/config
+	// response per user, which the worker cannot reproduce, so the endpoint is
+	// handed back to Synapse whenever modules are loaded at all. Being coarse
+	// costs a proxied request on a rarely called endpoint; being wrong would
+	// report a limit that is not the user's.
+	Modules []any `yaml:"modules"`
 }
 
 // LoadSynapseConfig reads and parses homeserver.yaml.

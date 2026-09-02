@@ -188,6 +188,70 @@ func compareConditional(goClient *http.Client, goBase string, synClient *http.Cl
 	}
 }
 
+// mediaConfigHeaders are what respond_with_json sets on /media/config. There is
+// no ETag and no CSP: it is a JSON API response, not media.
+var mediaConfigHeaders = []string{
+	"Content-Type",
+	"Cache-Control",
+	"Access-Control-Allow-Origin",
+	"Access-Control-Allow-Methods",
+	"Access-Control-Allow-Headers",
+	"Access-Control-Expose-Headers",
+}
+
+// compareMediaConfig diffs /media/config, in both spellings, byte for byte.
+// The body is a single number, so a difference here is a config the worker read
+// differently to Synapse -- parse_size's binary suffixes, most likely -- and
+// every client would be told the wrong upload limit.
+func compareMediaConfig(goClient *http.Client, goBase string, synClient *http.Client, synBase string, token string, r *result) {
+	for _, path := range []string{
+		"/_matrix/client/v1/media/config",
+		"/_matrix/media/v3/config",
+	} {
+		goResp, goBody, err1 := clientFetch(goClient, goBase, path, token, nil)
+		synResp, synBody, err2 := clientFetch(synClient, synBase, path, token, nil)
+		if err1 != nil || err2 != nil {
+			fmt.Printf("  %s: transport error (go=%v synapse=%v)\n", path, err1, err2)
+			r.skipped++
+			continue
+		}
+		r.checked++
+		if goResp.StatusCode != synResp.StatusCode {
+			fmt.Printf("  %s: status %d vs synapse %d\n", path, goResp.StatusCode, synResp.StatusCode)
+			r.mismatch++
+			continue
+		}
+		if !bytes.Equal(goBody, synBody) {
+			fmt.Printf("  %s: BODY DIFFERS (go %q, synapse %q)\n", path, goBody, synBody)
+			r.mismatch++
+			continue
+		}
+		if diffHeaders(path, goResp.Header, synResp.Header, mediaConfigHeaders) {
+			r.mismatch++
+		}
+	}
+
+	// Unauthenticated, both spellings must refuse. Synapse authenticates even
+	// the /_matrix/media one, and a worker that did not would leak the limit.
+	for _, path := range []string{
+		"/_matrix/client/v1/media/config",
+		"/_matrix/media/v3/config",
+	} {
+		goResp, _, err1 := clientFetch(goClient, goBase, path, "", nil)
+		synResp, _, err2 := clientFetch(synClient, synBase, path, "", nil)
+		if err1 != nil || err2 != nil {
+			r.skipped++
+			continue
+		}
+		r.checked++
+		if goResp.StatusCode != synResp.StatusCode {
+			fmt.Printf("  %s (no token): status %d vs synapse %d\n",
+				path, goResp.StatusCode, synResp.StatusCode)
+			r.mismatch++
+		}
+	}
+}
+
 // compareRange checks Range handling. Synapse does not implement Range and
 // answers 200 with the whole body; the worker answers 206 with the slice. That
 // divergence is intentional, so this asserts the worker's own correctness and

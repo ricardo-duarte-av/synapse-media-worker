@@ -29,14 +29,21 @@ default; see below.
 | GET | `/_matrix/federation/v1/media/download/{mediaId}` |
 | GET | `/_matrix/federation/v1/media/thumbnail/{mediaId}` |
 | GET | `/_matrix/media/{r0,v1,v3}/download|thumbnail/...` (legacy, unauthenticated) |
+| GET | `/_matrix/client/v1/media/config`, `/_matrix/media/{r0,v1,v3}/config` |
 | GET | `/health`, `/metrics` |
 
 With `accept_uploads` on it also serves `POST /_matrix/media/{r0,v1,v3}/upload`,
 `POST /_matrix/media/v1/create` and `PUT /_matrix/media/v3/upload/{server}/{id}`.
 
-Everything else on the media surface — `/media/config`, `preview_url`, the media
-admin APIs — is [passed through](#passing-through-what-it-does-not-implement) to
-Synapse, so you can route the whole surface here.
+`/media/config` reports `max_upload_size`, the same value uploads are checked
+against, read from `homeserver.yaml`. If `homeserver.yaml` loads any `modules`
+it is passed through instead: a module can register a
+`get_media_config_for_user` callback and replace that response per user, and
+the worker cannot run Synapse's modules.
+
+Everything else on the media surface — `preview_url`, the media admin APIs — is
+[passed through](#passing-through-what-it-does-not-implement) to Synapse, so you
+can route the whole surface here.
 
 ## Passing through what it does not implement
 
@@ -487,8 +494,8 @@ location ~ ^/_matrix/(media|client/v1/media|federation/v1/media)/ {
 ```
 
 Keep at least one Python media worker running. It is the passthrough target for
-`/media/config`, URL previews and the media admin APIs, and the fallback target
-for anything the Go worker declines. One is enough once the Go worker is
+URL previews and the media admin APIs, and the fallback target for anything the
+Go worker declines. One is enough once the Go worker is
 carrying the reads and uploads.
 
 ### A note on caching proxies

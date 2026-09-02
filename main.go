@@ -265,8 +265,7 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 }
 
 // routes wires the endpoints the worker owns. Anything not registered here
-// stays with Synapse: uploads, URL previews, /_matrix/client/v1/media/config
-// and every admin endpoint.
+// stays with Synapse: URL previews and every admin endpoint.
 func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 	mux := http.NewServeMux()
 
@@ -277,6 +276,14 @@ func (s *Server) routes(serverAuth *federation.ServerAuth) http.Handler {
 		instrument("client_download", http.HandlerFunc(s.handleClientDownload)))
 	mux.Handle("GET /_matrix/client/v1/media/thumbnail/{serverName}/{mediaId}",
 		instrument("client_thumbnail", http.HandlerFunc(s.handleClientThumbnail)))
+
+	// The upload limit, in both spellings. Synapse serves the same servlet at
+	// both, authenticated in both, and the number is one this worker already
+	// reads from homeserver.yaml.
+	mux.Handle("GET /_matrix/client/v1/media/config",
+		instrument("media_config", http.HandlerFunc(s.handleMediaConfig)))
+	mux.Handle("GET /_matrix/media/{version}/config",
+		instrument("media_config", http.HandlerFunc(s.handleLegacyMediaConfig)))
 
 	// Uploads. Registered unconditionally: with accept_uploads off they are
 	// proxied to Synapse, which keeps the routing stable either way.

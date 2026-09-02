@@ -8,8 +8,8 @@ import (
 // passthrough.go forwards requests the worker does not implement to Synapse.
 //
 // The worker owns a handful of endpoints and answers those itself. Everything
-// else on the media surface -- /media/config, preview_url, the admin APIs, and
-// anything a future Synapse adds -- is passed through, so a deployment can
+// else on the media surface -- preview_url, the admin APIs, and anything a
+// future Synapse adds -- is passed through, so a deployment can
 // route the whole media surface here without needing to enumerate which parts
 // this worker happens to understand.
 //
@@ -51,6 +51,14 @@ func isMediaAdminPath(path string) bool {
 
 // handlePassthrough forwards a request the worker does not implement.
 func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
+	s.passthroughFor(w, r, "not_implemented")
+}
+
+// passthroughFor forwards a request to Synapse, recording why. Most callers
+// are simply endpoints the worker does not implement; an endpoint it usually
+// answers can also defer, when something about this deployment means only
+// Synapse can produce the right response.
+func (s *Server) passthroughFor(w http.ResponseWriter, r *http.Request, reason string) {
 	if s.passthroughUp == nil {
 		// Nothing to forward to. Answering 404 is honest: this worker does not
 		// serve the endpoint and cannot say who does.
@@ -58,8 +66,8 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setOutcome(r.Context(), outcomeProxied)
-	annotate(r.Context(), func(rl *reqLog) { rl.reason = "not_implemented" })
-	proxiedTotal.WithLabelValues("passthrough", "not_implemented").Inc()
+	annotate(r.Context(), func(rl *reqLog) { rl.reason = reason })
+	proxiedTotal.WithLabelValues("passthrough", reason).Inc()
 	s.passthroughUp.ServeHTTP(w, r)
 }
 

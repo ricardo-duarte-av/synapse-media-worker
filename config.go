@@ -146,6 +146,11 @@ type MediaConfig struct {
 	// a miss); when Synapse has it off it selects a nearest match instead, and
 	// the two will disagree. Derived when unset.
 	DynamicThumbnails *bool `yaml:"dynamic_thumbnails"`
+
+	// synapseModules records that homeserver.yaml loads modules, which may
+	// override /media/config per user. Derived, never configured: it has no
+	// yaml tag and is unexported so the strict decoder cannot see it.
+	synapseModules bool
 }
 
 type CacheConfig struct {
@@ -184,7 +189,7 @@ type UpstreamConfig struct {
 	// off. Falls back to the download upstream when unset.
 	Upload UpstreamTarget `yaml:"upload"`
 	// Passthrough receives everything on the media surface this worker does
-	// not implement -- /media/config, preview_url and the media admin APIs.
+	// not implement -- preview_url and the media admin APIs.
 	// Falls back to the download upstream when unset.
 	//
 	// The quarantine admin APIs must reach an instance configured as a
@@ -301,6 +306,13 @@ func (m MediaConfig) ProxyFetchFailures() bool {
 // true as Synapse does.
 func (m MediaConfig) AuthenticatedMedia() bool {
 	return m.EnableAuthenticatedMedia == nil || *m.EnableAuthenticatedMedia
+}
+
+// ProxyMediaConfig reports whether /media/config must be handed to Synapse
+// rather than answered here, because a loaded module may replace the response
+// for some users.
+func (m MediaConfig) ProxyMediaConfig() bool {
+	return m.synapseModules
 }
 
 // DynamicThumbnailsEnabled reports Synapse's dynamic_thumbnails, whose default
@@ -504,6 +516,16 @@ func (c *Config) deriveFromSynapse() error {
 			// Never logged with the value: it carries the password.
 			c.derived.note("database.uri", "(from Synapse's database.args)")
 		}
+	}
+
+	if len(hs.Modules) > 0 {
+		// Sits with the other "Synapse does something this worker cannot"
+		// warnings, but this one is already handled rather than merely
+		// reported: the endpoint goes back to Synapse.
+		c.Media.synapseModules = true
+		c.derived.warn("modules are configured in Synapse and one may override " +
+			"/media/config per user; that endpoint will be passed through rather " +
+			"than answered here")
 	}
 
 	if len(hs.StorageProviders) > 0 {

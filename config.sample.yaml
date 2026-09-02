@@ -106,7 +106,7 @@ media:
   write_through_thumbnails: false
   fetch_timeout: 60s
   # Derived from synapse_config when unset. Caps how large a remote file the
-  # worker will store.
+  # worker will store, and is the value /media/config reports to clients.
   # max_upload_size: 52428800
 
   # Derived from synapse_config when unset; Synapse defaults it to true. When
@@ -151,7 +151,7 @@ upstream:
   upload:
     socket: /var/sockets/nginx/av-media-worker-uploads.sock
   # Everything on the media surface this worker does not implement --
-  # /media/config, preview_url, and the media admin APIs -- is forwarded here,
+  # preview_url and the media admin APIs -- is forwarded here,
   # so you can route the whole surface at this worker without enumerating which
   # parts it happens to serve. Falls back to `download`.
   #
