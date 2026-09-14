@@ -25,6 +25,11 @@ var (
 		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 	}, []string{"endpoint"})
 
+	responseBytes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "synapse_media_worker_response_bytes_total",
+		Help: "Response body bytes written, by endpoint.",
+	}, []string{"endpoint"})
+
 	// thumbnailOutcome is the number that justifies the design: how often the
 	// worker serves from Synapse's own thumbnails, from its cache, from a fresh
 	// generation, or has to fall back to Synapse.
@@ -159,5 +164,6 @@ func instrument(endpoint string, next http.Handler) http.Handler {
 		}
 		requestsTotal.WithLabelValues(endpoint, strconv.Itoa(rec.status)).Inc()
 		requestDuration.WithLabelValues(endpoint).Observe(time.Since(start).Seconds())
+		responseBytes.WithLabelValues(endpoint).Add(float64(rec.bytes))
 	})
 }

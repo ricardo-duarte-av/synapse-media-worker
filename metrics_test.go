@@ -3,8 +3,11 @@ package main
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 // readFromRecorder stands in for net/http's response writer, which implements
@@ -90,6 +93,25 @@ type plainWriter struct{ body strings.Builder }
 func (p *plainWriter) Header() http.Header         { return http.Header{} }
 func (p *plainWriter) Write(b []byte) (int, error) { return p.body.Write(b) }
 func (p *plainWriter) WriteHeader(int)             {}
+
+// The dashboard's "Bytes served/sec" reads this counter, and it must count
+// bodies sent through ReadFrom as well as Write.
+func TestInstrumentCountsResponseBytes(t *testing.T) {
+	const endpoint = "test_response_bytes"
+	h := instrument(endpoint, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "head")
+		io.Copy(w, &bareReader{s: "and body"})
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	var m dto.Metric
+	if err := responseBytes.WithLabelValues(endpoint).Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.GetCounter().GetValue(); got != 12 {
+		t.Errorf("response bytes = %v, want 12", got)
+	}
+}
 
 func TestStatusRecorderUnwrap(t *testing.T) {
 	inner := &plainWriter{}

@@ -32,7 +32,22 @@ Then scrape it. The container has to be on a network Prometheus can reach:
 ```
 
 Import the dashboard and pick the Prometheus datasource when prompted. The
-`job` variable is populated from the data, so it works with any job name.
+`job` and `instance` variables are populated from the data, so it works with
+any job name.
+
+## Buckets
+
+The **Bucket** variable sets both the rate window and the step of every query,
+so each point on a graph summarises exactly one bucket: pick `1h` and you see
+hourly averages, `1d` for daily. The stat tiles show the latest bucket.
+
+`auto` scales the bucket with the time range, but never below `1m`. That floor
+is four scrapes at a 15s interval, the least a `rate()` needs to return
+anything; if you scrape less often, raise `auto_min` and drop the `1m` option
+in the variable settings, or short buckets will render empty.
+
+Grafana caps how many points a panel draws, so a small bucket over a long
+range is widened automatically. That is why `auto` is the sensible default.
 
 ## Reading it
 
@@ -61,13 +76,14 @@ least-connections usually means one worker is slow, not that balancing is
 broken.
 
 **Uploads by endpoint and result** keeps two dimensions apart deliberately.
-`sync`, `create` and `async` are endpoints; `stored`, `too_large`, `limited`,
-`forbidden`, `conflict`, `not_found`, `failed` and `proxied` are outcomes. Most
-of the refusals are spec-defined and routine at low rates, with two worth
-watching: a rising `limited` means some client is reserving async media IDs via
-`/create` and never uploading to them, which will lock it out for up to
-`unused_expiration_time`; and `failed` should be zero, since everything else has
-a defined status.
+`sync`, `create` and `async` are endpoints; `stored`, `reserved`, `too_large`,
+`limited`, `over_quota`, `forbidden`, `conflict`, `not_found`, `failed` and
+`proxied` are outcomes. Most of the refusals are spec-defined and routine at
+low rates, with three worth watching: a rising `limited` means some client is
+reserving async media IDs via `/create` and never uploading to them, which will
+lock it out for up to `unused_expiration_time`; `over_quota` means users are
+hitting `media_upload_limits`; and `failed` should be zero, since everything
+else has a defined status.
 
 `proxied` simply means `accept_uploads` is off and Synapse is handling them.
 
