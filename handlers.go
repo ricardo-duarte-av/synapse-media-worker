@@ -529,7 +529,7 @@ func (s *Server) authenticateClient(w http.ResponseWriter, r *http.Request) bool
 			"Missing access token")
 		return false
 	}
-	verdict, err := s.auth.Authenticate(r.Context(), token)
+	verdict, err := s.auth.AuthenticateAs(r.Context(), Credentials{Token: token, Forwarded: ClientHeaders(r)})
 	if err != nil {
 		// Synapse could not be asked. This is not the caller's fault, so it
 		// must not be reported as an invalid token.

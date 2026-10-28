@@ -107,6 +107,27 @@ type Credentials struct {
 	Token    string
 	UserID   string
 	DeviceID string
+
+	// Forwarded are the client's X-Forwarded-For, X-Forwarded-Proto and
+	// User-Agent, sent on to whoami: Synapse records the request in
+	// user_ips from them (_record_request). Without them it recorded this
+	// worker -- Go-http-client/1.1 at main's socket -- for every client
+	// whose token it checked. Not part of the cache key.
+	Forwarded http.Header
+}
+
+// forwardedHeaders are what Synapse reads about the client behind a proxy.
+var forwardedHeaders = []string{"X-Forwarded-For", "X-Forwarded-Proto", "User-Agent"}
+
+// ClientHeaders copies the request's forwardedHeaders.
+func ClientHeaders(r *http.Request) http.Header {
+	h := http.Header{}
+	for _, k := range forwardedHeaders {
+		if v := r.Header.Values(k); len(v) > 0 {
+			h[k] = v
+		}
+	}
+	return h
 }
 
 // ExtractCredentials pulls the caller's token and any masquerade parameters
@@ -114,9 +135,10 @@ type Credentials struct {
 func ExtractCredentials(r *http.Request) Credentials {
 	q := r.URL.Query()
 	return Credentials{
-		Token:    ExtractToken(r),
-		UserID:   q.Get("user_id"),
-		DeviceID: q.Get("device_id"),
+		Token:     ExtractToken(r),
+		UserID:    q.Get("user_id"),
+		DeviceID:  q.Get("device_id"),
+		Forwarded: ClientHeaders(r),
 	}
 }
 
@@ -213,6 +235,11 @@ func (a *TokenAuthenticator) callWhoami(ctx context.Context, creds Credentials) 
 		return tokenVerdict{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+creds.Token)
+	for _, k := range forwardedHeaders {
+		if v := creds.Forwarded.Values(k); len(v) > 0 {
+			req.Header[k] = v
+		}
+	}
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return tokenVerdict{}, fmt.Errorf("whoami request failed: %w", err)

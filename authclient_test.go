@@ -284,3 +284,26 @@ func TestCacheKeyIncludesMasquerade(t *testing.T) {
 		t.Errorf("whoami called %d times, want one per distinct user", calls)
 	}
 }
+
+// Synapse records user_ips from these: without them every client whose
+// token this worker checked was recorded as Go-http-client/1.1 at main's
+// socket.
+func TestWhoamiCarriesTheClientsHeaders(t *testing.T) {
+	var got http.Header
+	a, _ := newTestAuth(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"user_id":"@a:example.com"}`))
+	})
+	r := httptest.NewRequest(http.MethodPost, "/_matrix/media/v3/upload", nil)
+	r.Header.Set("Authorization", "Bearer tok")
+	r.Header.Set("X-Forwarded-For", "203.0.113.5")
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("User-Agent", "Element/1.0")
+	if _, err := a.AuthenticateAs(context.Background(), ExtractCredentials(r)); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("X-Forwarded-For") != "203.0.113.5" || got.Get("X-Forwarded-Proto") != "https" ||
+		got.Get("User-Agent") != "Element/1.0" {
+		t.Fatalf("whoami saw %v", got)
+	}
+}
