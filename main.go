@@ -148,7 +148,8 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 			"does not implement will 404 rather than reaching Synapse")
 	}
 
-	serverAuth, fedClient, err := newFederationAuth(cfg, log)
+	userAgent := NewUserAgent(cfg.Media.UserAgent, cfg.Media.UserAgentSuffix)
+	serverAuth, fedClient, err := newFederationAuth(cfg, userAgent, log)
 	if err != nil {
 		return err
 	}
@@ -210,6 +211,10 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		log.Info().Msg("Configuration and access checks passed")
 		return nil
 	}
+
+	// Before serving, so the first outbound request already looks like the
+	// homeserver's. Bounded: an unreachable homeserver must not stop startup.
+	RefreshUserAgent(ctx, fedClient, userAgent, cfg.ServerName, 10*time.Second, log)
 
 	stopJanitor := make(chan struct{})
 	go cache.RunJanitor(cfg.Cache.SweepInterval, stopJanitor)
@@ -386,7 +391,7 @@ func withCORSPreflight(next http.Handler) http.Handler {
 // fetching and caching the origin server's signing keys, checking their
 // self-signatures and verifying the request signature. Reimplementing any of
 // that would be a security liability for no gain.
-func newFederationAuth(cfg *Config, log zerolog.Logger) (*federation.ServerAuth, *federation.Client, error) {
+func newFederationAuth(cfg *Config, ua *UserAgent, log zerolog.Logger) (*federation.ServerAuth, *federation.Client, error) {
 	if cfg.Media.SigningKeyPath == "" {
 		return nil, nil, errors.New("media.signing_key_path is required to serve federation media")
 	}
@@ -401,6 +406,7 @@ func newFederationAuth(cfg *Config, log zerolog.Logger) (*federation.ServerAuth,
 	// well-known lookups and signing keys are cached together.
 	cache := federation.NewInMemoryCache()
 	client := federation.NewClient(cfg.ServerName, key, cache, exhttp.SensibleClientSettings)
+	InstallUserAgent(client, ua)
 	auth := federation.NewServerAuth(client, cache,
 		func(federation.XMatrixAuth) string { return cfg.ServerName })
 	return auth, client, nil

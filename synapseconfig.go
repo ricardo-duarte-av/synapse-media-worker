@@ -49,6 +49,10 @@ type SynapseConfig struct {
 	// https://<server_name>/ and forces a trailing slash.
 	PublicBaseurl string `yaml:"public_baseurl"`
 
+	// UserAgentSuffix is appended to the User-Agent of Synapse's .well-known
+	// lookups and plain HTTP requests, so the worker's must carry it too.
+	UserAgentSuffix string `yaml:"user_agent_suffix"`
+
 	DynamicThumbnails        *bool `yaml:"dynamic_thumbnails"`
 	EnableAuthenticatedMedia *bool `yaml:"enable_authenticated_media"`
 

@@ -49,6 +49,13 @@ media:
   # Synapse's signing key, used to authenticate outbound server-key lookups
   # while verifying inbound federation requests.
   signing_key_path: /data/signing.key
+  # Outbound requests carry Synapse's User-Agent, "Synapse/<version>", with the
+  # version asked of the homeserver's /_matrix/federation/v1/version at startup
+  # and hourly after. Leave user_agent unset unless that lookup cannot work;
+  # a pinned value goes stale when Synapse is upgraded.
+  # user_agent: "Synapse/1.164.1"
+  # Derived from synapse_config when unset.
+  # user_agent_suffix: ""
   # Derived from synapse_config when unset. Synapse's suffixes are binary, so
   # if you do set it here, 100M is 104857600.
   # max_image_pixels: 104857600

@@ -194,6 +194,28 @@ and orphans the old one.
 retention and `purge_media_cache` delete on that column, so a backdated value
 invites the media to be deleted almost immediately.
 
+### Outbound User-Agent
+
+Peers see the worker as part of a Synapse homeserver, so its requests carry
+Synapse's User-Agent rather than mautrix's. Synapse sends three variants, and
+so does the worker:
+
+| Request | User-Agent |
+|---|---|
+| Signed federation requests (downloads, key lookups) | `Synapse/<version>` |
+| `.well-known` lookups | `Synapse/<version> <user_agent_suffix>` |
+| Plain HTTPS, e.g. following a download's `Location` | `Synapse/<version> <user_agent_suffix>` |
+
+`user_agent_suffix` does **not** reach signed federation requests: Synapse sets
+that header per request from `hs.version_string`, so the agent's suffixed
+default never applies.
+
+`<version>` is what the homeserver reports from
+`/_matrix/federation/v1/version`. The worker asks at startup and every hour
+after, so it follows Synapse upgrades without a restart. Until the first answer
+it sends plain `Synapse`. `media.user_agent` pins the value instead, and
+`media.user_agent_suffix` is derived from `homeserver.yaml`.
+
 ### What it deliberately does not do
 
 - **No thumbnails at fetch time.** Synapse pre-generates its default set on

@@ -76,6 +76,15 @@ type MediaConfig struct {
 	// SigningKeyPath is Synapse's signing.key file, used to authenticate
 	// outbound server-key lookups during inbound federation verification.
 	SigningKeyPath string `yaml:"signing_key_path"`
+	// UserAgent replaces the version part of the outbound User-Agent, e.g.
+	// "Synapse/1.164.1". Leave it unset: the worker asks its homeserver's
+	// /_matrix/federation/v1/version and follows upgrades, which a fixed
+	// value cannot.
+	UserAgent string `yaml:"user_agent"`
+	// UserAgentSuffix mirrors Synapse's user_agent_suffix, appended to the
+	// User-Agent of .well-known lookups and plain HTTPS fetches (not signed
+	// federation requests, matching Synapse). Derived when unset.
+	UserAgentSuffix string `yaml:"user_agent_suffix"`
 	// MaxImagePixels mirrors Synapse's max_image_pixels. Images at or above
 	// this many pixels are never thumbnailed by the worker. Derived when unset.
 	MaxImagePixels *int64 `yaml:"max_image_pixels"`
@@ -565,6 +574,10 @@ func (c *Config) deriveFromSynapse() error {
 	if c.Media.DynamicThumbnails == nil && hs.DynamicThumbnails != nil {
 		c.Media.DynamicThumbnails = hs.DynamicThumbnails
 		c.derived.note("media.dynamic_thumbnails", fmt.Sprintf("%t", *hs.DynamicThumbnails))
+	}
+	if c.Media.UserAgentSuffix == "" && hs.UserAgentSuffix != "" {
+		c.Media.UserAgentSuffix = hs.UserAgentSuffix
+		c.derived.note("media.user_agent_suffix", hs.UserAgentSuffix)
 	}
 	if c.Media.StorePath == "" && hs.MediaStorePath != "" {
 		if _, err := os.Stat(hs.MediaStorePath); err == nil {
