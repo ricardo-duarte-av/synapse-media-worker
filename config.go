@@ -607,7 +607,7 @@ func (c *Config) deriveFromSynapse() error {
 
 	if hs.URLPreviewEnabled == nil || !*hs.URLPreviewEnabled {
 		c.derived.warn("url_preview_enabled is off in homeserver.yaml, so Synapse " +
-			"does not serve preview_url and URL previews will 404 through the " +
+			"refuses preview_url and URL previews will be 403 through the " +
 			"passthrough unless that worker's own config enables them")
 	}
 	if len(hs.Modules) > 0 {

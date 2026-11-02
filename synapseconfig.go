@@ -68,8 +68,8 @@ type SynapseConfig struct {
 	} `yaml:"database"`
 
 	// URLPreviewEnabled is read only to warn. The worker passes preview_url
-	// through, and with this off (Synapse's default) Synapse never registers
-	// the servlet, so every preview is a 404 that looks like the worker's.
+	// through, and with this off (Synapse's default) Synapse answers every
+	// preview 403 "URL Previews are disabled".
 	URLPreviewEnabled *bool `yaml:"url_preview_enabled"`
 
 	// Presence of these is a warning sign rather than something to read: the

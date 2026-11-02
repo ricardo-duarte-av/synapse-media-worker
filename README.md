@@ -78,9 +78,9 @@ Two things to get right in `upstream.passthrough`:
   an instance configured as a `quarantined_media_changes` writer. Any media
   worker will do for downloads; not for these.
 - **URL previews need `url_preview_enabled`** on the target worker. It
-  defaults to off, and with it off Synapse never registers `preview_url`, so
-  every preview 404s — through the worker or not. The worker warns at startup
-  when `homeserver.yaml` has it off. Turning it on requires
+  defaults to off, and with it off Synapse answers every preview with
+  `403 M_FORBIDDEN` "URL Previews are disabled" — through the worker or not.
+  The worker warns at startup when `homeserver.yaml` has it off. Turning it on requires
   `url_preview_ip_range_blacklist`; start from the full list in Synapse's
   [config documentation](https://element-hq.github.io/synapse/latest/usage/configuration/config_documentation.html#url_preview_ip_range_blacklist),
   and make sure it covers the Docker networks Synapse sits on, or any room
