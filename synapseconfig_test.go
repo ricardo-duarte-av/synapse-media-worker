@@ -205,7 +205,8 @@ prevent_media_downloads_from:
 		t.Fatal(err)
 	}
 	joined := strings.Join(cfg.derived.Warnings, "\n")
-	for _, want := range []string{"media_storage_providers", "prevent_media_downloads_from", "dynamic_thumbnails"} {
+	for _, want := range []string{"media_storage_providers", "prevent_media_downloads_from",
+		"dynamic_thumbnails", "url_preview_enabled"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("no warning about %s; got:\n%s", want, joined)
 		}
@@ -235,5 +236,61 @@ func TestDatabaseURIFromSynapseArgs(t *testing.T) {
 	var empty SynapseConfig
 	if _, ok := empty.DatabaseURI(); ok {
 		t.Error("built a URI from empty args")
+	}
+}
+
+// Previews are passed through, so the only thing to say about them is when
+// Synapse will refuse them; an enabled server must not be warned at.
+func TestDeriveWarnsOnlyWhenURLPreviewsAreOff(t *testing.T) {
+	for _, tc := range []struct {
+		setting string
+		warn    bool
+	}{
+		{"", true}, // Synapse's default is off
+		{"url_preview_enabled: false\n", true},
+		{"url_preview_enabled: true\n", false},
+	} {
+		path := filepath.Join(t.TempDir(), "homeserver.yaml")
+		body := "server_name: example.com\ndynamic_thumbnails: true\n" + tc.setting
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := defaultConfig()
+		cfg.SynapseConfig = path
+		if err := cfg.deriveFromSynapse(); err != nil {
+			t.Fatal(err)
+		}
+		warned := strings.Contains(strings.Join(cfg.derived.Warnings, "\n"), "url_preview_enabled")
+		if warned != tc.warn {
+			t.Errorf("%q: warned = %t, want %t (%v)", tc.setting, warned, tc.warn, cfg.derived.Warnings)
+		}
+	}
+}
+
+// user_agent_suffix reaches the worker's .well-known and redirect requests,
+// as it reaches Synapse's; an explicit value still wins.
+func TestDeriveUserAgentSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "homeserver.yaml")
+	body := "server_name: example.com\nuser_agent_suffix: (contact admin@example.com)\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.SynapseConfig = path
+	if err := cfg.deriveFromSynapse(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Media.UserAgentSuffix; got != "(contact admin@example.com)" {
+		t.Errorf("user_agent_suffix = %q", got)
+	}
+
+	cfg = defaultConfig()
+	cfg.SynapseConfig = path
+	cfg.Media.UserAgentSuffix = "mine"
+	if err := cfg.deriveFromSynapse(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Media.UserAgentSuffix; got != "mine" {
+		t.Errorf("explicit user_agent_suffix was overridden: %q", got)
 	}
 }

@@ -77,7 +77,17 @@ Two things to get right in `upstream.passthrough`:
 - **Quarantine needs a writer.** The quarantine and purge admin APIs must reach
   an instance configured as a `quarantined_media_changes` writer. Any media
   worker will do for downloads; not for these.
-- **URL previews need `url_preview_enabled`** on the target worker.
+- **URL previews need `url_preview_enabled`** on the target worker. It
+  defaults to off, and with it off Synapse never registers `preview_url`, so
+  every preview 404s — through the worker or not. The worker warns at startup
+  when `homeserver.yaml` has it off. Turning it on requires
+  `url_preview_ip_range_blacklist`; start from the full list in Synapse's
+  [config documentation](https://element-hq.github.io/synapse/latest/usage/configuration/config_documentation.html#url_preview_ip_range_blacklist),
+  and make sure it covers the Docker networks Synapse sits on, or any room
+  member can make Synapse fetch internal services. Previews are not
+  implemented natively: they would mean writing to `url_cache/`, which stays
+  unwritable, and reproducing lxml's HTML parsing, which a Go parser would not
+  match.
 
 If no passthrough upstream is configured the worker answers 404 for these paths,
 which is honest — it does not serve them and cannot say who does. An upstream
