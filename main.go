@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -257,12 +256,8 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		Str("server_name", cfg.ServerName).
 		Msg("Media worker ready")
 
-	if cfg.Media.UploadsAccepted() {
-		// Deliberately after the listener is up and in the background: this
-		// walks every file under local_content and local_thumbnails, which on
-		// a large store takes minutes. Doing it before binding the socket meant
-		// nothing could reach the worker until it finished.
-		go sweepStaleUploads(cfg.Media.StorePath, log, stopJanitor)
+	if cfg.Media.FetchRemote || cfg.Media.UploadsAccepted() {
+		sweepStaleTempFiles(srv.paths, log)
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -565,48 +560,38 @@ func logDerivedConfig(log zerolog.Logger, cfg *Config) {
 	}
 }
 
-// sweepStaleUploads removes temporary files left by an interrupted upload.
+// sweepStaleTempFiles removes temporary files left by an interrupted write.
 //
-// The temp file lives in the destination directory so it can be renamed
-// atomically, which means a hard crash mid-upload leaks one there. Those are
-// rare -- every failure path removes its own -- so this is hygiene, not
-// something to hold startup for.
-//
-// It walks the whole of local_content and local_thumbnails, which takes minutes
-// on a large store, so it runs in the background after the worker is already
-// serving and gives up promptly on shutdown.
-func sweepStaleUploads(base string, log zerolog.Logger, stop <-chan struct{}) {
+// Every failure path removes its own temp file, so these only come from a hard
+// crash mid-write. They all live in the .tmp directory of a writable top-level
+// directory (see MediaPaths.CreateTemp), so this lists a few directories rather
+// than walking the store: the walk it replaces read every shard of
+// local_content and local_thumbnails on each start, which took the best part
+// of an hour and filled the container's page cache with directory blocks.
+func sweepStaleTempFiles(paths *MediaPaths, log zerolog.Logger) {
 	started := time.Now()
 	var removed, scanned int
-
-	for _, dir := range []string{"local_content", "local_thumbnails"} {
-		root := filepath.Join(base, dir)
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			select {
-			case <-stop:
-				return filepath.SkipAll
-			default:
+	for _, dir := range paths.TempDirs() {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Warn().Err(err).Str("dir", dir).Msg("Could not list temporary files")
 			}
-			if err != nil || d.IsDir() {
-				return nil
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
 			}
 			scanned++
-			name := d.Name()
-			if !strings.HasPrefix(name, ".incoming-") && !strings.HasPrefix(name, ".thumb-") {
-				return nil
-			}
 			// Only sweep what is clearly abandoned, never a write in flight.
-			if info, err := d.Info(); err == nil && time.Since(info.ModTime()) < time.Hour {
-				return nil
+			info, err := e.Info()
+			if err != nil || time.Since(info.ModTime()) < time.Hour {
+				continue
 			}
-			if os.Remove(path) == nil {
+			if os.Remove(filepath.Join(dir, e.Name())) == nil {
 				removed++
 			}
-			return nil
-		})
-		if err != nil {
-			log.Debug().Err(err).Str("dir", dir).Msg("Stale upload sweep interrupted")
-			return
 		}
 	}
 
@@ -616,7 +601,7 @@ func sweepStaleUploads(base string, log zerolog.Logger, stop <-chan struct{}) {
 	}
 	event.Int("removed", removed).Int("scanned", scanned).
 		Dur("took", time.Since(started)).
-		Msg("Swept stale upload temporary files")
+		Msg("Swept stale temporary files")
 }
 
 // checkNotSelf refuses an upstream that points back at this worker.

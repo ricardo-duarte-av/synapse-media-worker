@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -286,4 +287,45 @@ func (p *MediaPaths) WritablePath(path string) error {
 	}
 	return fmt.Errorf("refusing to write to %q: only %s may be written",
 		rel, strings.Join(allowed, ", "))
+}
+
+// tempDirName is the directory, inside each writable top-level directory, that
+// holds files being written before they are renamed into place.
+//
+// Keeping temp files there rather than beside their destination means an
+// interrupted write can be found by listing a handful of directories, instead
+// of walking every shard of the store. It stays inside the top-level directory
+// so the rename never crosses a filesystem, even where local_content and
+// remote_content are separate mounts, and its name cannot be one of Synapse's
+// two-character shard directories.
+const tempDirName = ".tmp"
+
+// CreateTemp creates a temporary file for a write that will be renamed onto
+// finalPath, after checking finalPath may be written at all.
+func (p *MediaPaths) CreateTemp(finalPath, pattern string) (*os.File, error) {
+	if err := p.WritablePath(finalPath); err != nil {
+		return nil, err
+	}
+	rel, err := filepath.Rel(p.base, filepath.Clean(finalPath))
+	if err != nil {
+		return nil, err
+	}
+	top, rest, _ := strings.Cut(rel, string(filepath.Separator))
+	if rest == "" {
+		return nil, fmt.Errorf("refusing to write %q: not inside a media directory", rel)
+	}
+	dir := filepath.Join(p.base, top, tempDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating temporary directory: %w", err)
+	}
+	return os.CreateTemp(dir, pattern)
+}
+
+// TempDirs lists the directories CreateTemp may currently use.
+func (p *MediaPaths) TempDirs() []string {
+	var dirs []string
+	for _, top := range p.writablePrefixes() {
+		dirs = append(dirs, filepath.Join(p.base, top, tempDirName))
+	}
+	return dirs
 }

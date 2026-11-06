@@ -141,12 +141,12 @@ func (rf *RemoteFetcher) fetchAndStore(ctx context.Context, origin, mediaID stri
 	return media, nil
 }
 
-// download streams the media into a temporary file beside its final path and
-// returns the temp file's name. Writing to a temp file and renaming means a
+// download streams the media into a temporary file under remote_content/.tmp
+// and returns the temp file's name. Writing to a temp file and renaming means a
 // crash mid-download cannot leave a truncated file that looks complete --
 // Synapse writes in place and does not have that property.
 func (rf *RemoteFetcher) download(ctx context.Context, origin, mediaID, finalPath string) (*FetchedMedia, string, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(finalPath), ".incoming-*")
+	tmp, err := rf.paths.CreateTemp(finalPath, ".incoming-*")
 	if err != nil {
 		return nil, "", fmt.Errorf("creating temporary file: %w", err)
 	}
@@ -207,7 +207,7 @@ func (rf *RemoteFetcher) WriteThroughRemoteThumbnail(
 		return fmt.Errorf("creating thumbnail directory: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".thumb-*")
+	tmp, err := rf.paths.CreateTemp(path, ".thumb-*")
 	if err != nil {
 		return fmt.Errorf("creating temporary thumbnail: %w", err)
 	}

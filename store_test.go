@@ -163,7 +163,7 @@ func TestDownloadWritesCompleteFile(t *testing.T) {
 		log:     zerolog.Nop(),
 	}
 	// Drive the temp-file mechanics with a body from the fake origin.
-	tmp, err := os.CreateTemp(filepath.Dir(final), ".incoming-*")
+	tmp, err := NewMediaPaths(dir).CreateTemp(final, ".incoming-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,10 +202,5 @@ func TestDownloadWritesCompleteFile(t *testing.T) {
 		t.Errorf("mode = %v, want 0644", st.Mode().Perm())
 	}
 	// No .incoming-* left over.
-	entries, _ := os.ReadDir(filepath.Dir(final))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".incoming-") {
-			t.Errorf("temporary file left behind: %s", e.Name())
-		}
-	}
+	assertNoTempFiles(t, final)
 }

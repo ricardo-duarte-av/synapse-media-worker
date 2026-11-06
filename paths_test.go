@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -275,6 +277,65 @@ func TestWritablePathWidensForUploads(t *testing.T) {
 	} {
 		if err := p.WritablePath(path); err == nil {
 			t.Errorf("%q must never be writable", path)
+		}
+	}
+}
+
+// Temp files go in the .tmp of the destination's top-level directory, and only
+// where the destination itself may be written.
+func TestCreateTempLocation(t *testing.T) {
+	base := t.TempDir()
+	paths := NewMediaPaths(base)
+
+	final, err := paths.RemoteMedia("example.org", "AbCdEfGhIjKlMnOpQrStUvWx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := paths.CreateTemp(final, ".incoming-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if want := filepath.Join(base, "remote_content", tempDirName); filepath.Dir(f.Name()) != want {
+		t.Errorf("temp file in %s, want %s", filepath.Dir(f.Name()), want)
+	}
+
+	local, err := paths.LocalMedia("AbCdEfGhIjKlMnOpQrStUvWx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := paths.CreateTemp(local, ".incoming-*"); err == nil {
+		t.Error("CreateTemp allowed a local_content write with uploads off")
+	}
+	if _, err := os.Stat(filepath.Join(base, "local_content")); !os.IsNotExist(err) {
+		t.Error("a refused CreateTemp still created directories under local_content")
+	}
+	for _, refused := range []string{
+		filepath.Join(base, "url_cache", "ab", "cd", "x"),
+		filepath.Join(base, "remote_content"), // not inside a media directory
+		filepath.Join(base, "..", "elsewhere", "x"),
+	} {
+		if _, err := paths.CreateTemp(refused, ".incoming-*"); err == nil {
+			t.Errorf("CreateTemp(%s) was allowed", refused)
+		}
+	}
+}
+
+// assertNoTempFiles fails if a temp file survives beside finalPath or in the
+// .tmp directory of any directory above it.
+func assertNoTempFiles(t *testing.T, finalPath string) {
+	t.Helper()
+	if entries, _ := os.ReadDir(filepath.Dir(finalPath)); entries != nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".incoming-") || strings.HasPrefix(e.Name(), ".thumb-") {
+				t.Errorf("temporary file left beside the media: %s", e.Name())
+			}
+		}
+	}
+	for dir := filepath.Dir(finalPath); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		entries, _ := os.ReadDir(filepath.Join(dir, tempDirName))
+		for _, e := range entries {
+			t.Errorf("temporary file left behind: %s", filepath.Join(dir, tempDirName, e.Name()))
 		}
 	}
 }

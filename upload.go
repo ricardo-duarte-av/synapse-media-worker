@@ -436,7 +436,7 @@ func (u *Uploader) store(r *http.Request, mediaID, mediaType string, declared in
 		return nil, fmt.Errorf("creating media directory: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".incoming-*")
+	tmp, err := u.paths.CreateTemp(path, ".incoming-*")
 	if err != nil {
 		return nil, fmt.Errorf("creating temporary file: %w", err)
 	}
@@ -684,7 +684,7 @@ func (u *Uploader) generateUploadThumbnails(mediaID, srcPath, mediaType string) 
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			continue
 		}
-		if err := writeFileAtomic(path, data); err != nil {
+		if err := writeFileAtomic(u.paths, path, data); err != nil {
 			continue
 		}
 		length := int64(len(data))
@@ -725,10 +725,10 @@ func synapseThumbnailType(sourceType string) (string, bool) {
 	}
 }
 
-// writeFileAtomic writes data via a temporary file in the same directory, so a
+// writeFileAtomic writes data via a temporary file renamed into place, so a
 // crash cannot leave a partial file that looks complete.
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".thumb-*")
+func writeFileAtomic(paths *MediaPaths, path string, data []byte) error {
+	tmp, err := paths.CreateTemp(path, ".thumb-*")
 	if err != nil {
 		return err
 	}

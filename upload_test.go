@@ -88,12 +88,7 @@ func TestUploadStoresAtSynapsePath(t *testing.T) {
 		t.Errorf("mode = %v, want 0644 to match Synapse", info.Mode().Perm())
 	}
 	// No temporary file may survive.
-	entries, _ := os.ReadDir(filepath.Dir(want))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".incoming-") {
-			t.Errorf("temporary file left behind: %s", e.Name())
-		}
-	}
+	assertNoTempFiles(t, want)
 }
 
 // A body larger than the limit must be cut off rather than trusted, since
@@ -432,12 +427,7 @@ func TestAsyncLoserNeverTouchesTheSharedPath(t *testing.T) {
 		t.Errorf("file contains %q, want the winner's bytes", got)
 	}
 	// And no temp files survive.
-	entries, _ := os.ReadDir(filepath.Dir(winner.path))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".incoming-") {
-			t.Errorf("temporary file left behind: %s", e.Name())
-		}
-	}
+	assertNoTempFiles(t, winner.path)
 }
 
 // Discarding must be safe to call twice and must not touch the final path.

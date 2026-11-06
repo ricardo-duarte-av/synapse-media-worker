@@ -3,108 +3,78 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 )
 
-// The sweep walks every file under local_content and local_thumbnails. On a
-// real store that is minutes, so it must never run before the listener is
-// created -- doing so meant the socket did not appear and nothing could reach
-// the worker at all.
-//
-// This guards the ordering in run(), which no other test covers.
-func TestSweepDoesNotRunBeforeTheListener(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(src)
-
-	sweep := strings.Index(body, "go sweepStaleUploads(")
-	if sweep < 0 {
-		t.Fatal("sweepStaleUploads is not launched in the background; it will block startup")
-	}
-	listener := strings.Index(body, "makeListener(cfg.Listen)")
-	if listener < 0 {
-		t.Fatal("could not find the listener creation")
-	}
-	if sweep < listener {
-		t.Error("the stale-upload sweep is started before the listener; " +
-			"on a large media store the socket will not appear for minutes")
-	}
-	// A blocking call would reintroduce the bug even if a background one exists.
-	for _, line := range strings.Split(body, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "sweepStaleUploads(") {
-			t.Errorf("sweepStaleUploads is called synchronously: %q", trimmed)
-		}
-	}
-}
-
-// The sweep must abandon its walk when the worker is shutting down, rather than
-// holding it open for the length of a full scan.
-func TestSweepStopsOnShutdown(t *testing.T) {
+// Abandoned temp files go; recent ones and real media stay, and nothing outside
+// the .tmp directories is looked at.
+func TestSweepRemovesOnlyAbandonedTempFiles(t *testing.T) {
 	base := t.TempDir()
-	dir := filepath.Join(base, "local_thumbnails", "ab", "cd")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for i := range 200 {
-		name := filepath.Join(dir, "file"+string(rune('a'+i%26))+string(rune('a'+i/26)))
-		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+	paths := NewMediaPaths(base)
+	paths.AllowUploadWrites()
+
+	tmpDir := filepath.Join(base, "local_content", tempDirName)
+	shard := filepath.Join(base, "local_content", "ab", "cd")
+	for _, d := range []string{tmpDir, shard} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	stop := make(chan struct{})
-	close(stop) // already shutting down
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sweepStaleUploads(base, zerolog.Nop(), stop)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sweep did not give up when told to stop")
-	}
-}
-
-// Abandoned temp files go; recent ones and real media stay.
-func TestSweepRemovesOnlyAbandonedTempFiles(t *testing.T) {
-	base := t.TempDir()
-	dir := filepath.Join(base, "local_content", "ab", "cd")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	old := filepath.Join(dir, ".incoming-abandoned")
-	fresh := filepath.Join(dir, ".incoming-inflight")
-	real := filepath.Join(dir, "EfGhIjKlMnOpQrStUvWx")
-	for _, p := range []string{old, fresh, real} {
+	old := filepath.Join(tmpDir, ".incoming-abandoned")
+	fresh := filepath.Join(tmpDir, ".incoming-inflight")
+	remoteOld := filepath.Join(base, "remote_thumbnail", tempDirName, ".thumb-abandoned")
+	real := filepath.Join(shard, "EfGhIjKlMnOpQrStUvWx")
+	// A shard is never read, so even a stale temp-looking file there stays.
+	inShard := filepath.Join(shard, ".incoming-legacy")
+	for _, p := range []string{old, fresh, remoteOld, real, inShard} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Age the abandoned one past the grace period.
 	past := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(old, past, past); err != nil {
+	for _, p := range []string{old, remoteOld, real, inShard} {
+		if err := os.Chtimes(p, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sweepStaleTempFiles(paths, zerolog.Nop())
+
+	for _, p := range []string{old, remoteOld} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("abandoned temp file %s survived the sweep", p)
+		}
+	}
+	for _, p := range []string{fresh, real, inShard} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed", p)
+		}
+	}
+}
+
+// Without uploads, local_content is not writable, so the sweep must not touch
+// its .tmp either.
+func TestSweepRespectsTheWriteGuard(t *testing.T) {
+	base := t.TempDir()
+	paths := NewMediaPaths(base)
+	old := filepath.Join(base, "local_content", tempDirName, ".incoming-abandoned")
+	if err := os.MkdirAll(filepath.Dir(old), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	sweepStaleUploads(base, zerolog.Nop(), make(chan struct{}))
-
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Error("an abandoned temp file survived the sweep")
+	if err := os.WriteFile(old, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(fresh); err != nil {
-		t.Error("a temp file still being written was removed")
-	}
-	if _, err := os.Stat(real); err != nil {
-		t.Error("real media was removed")
+	past := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(old, past, past)
+
+	sweepStaleTempFiles(paths, zerolog.Nop())
+	if _, err := os.Stat(old); err != nil {
+		t.Error("the sweep removed a file under local_content with uploads off")
 	}
 }

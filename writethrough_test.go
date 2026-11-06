@@ -126,12 +126,7 @@ func TestWriteThroughFileMechanics(t *testing.T) {
 	if info.Size() != int64(len(payload)) {
 		t.Errorf("size = %d, want %d", info.Size(), len(payload))
 	}
-	entries, _ := os.ReadDir(filepath.Dir(path))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".thumb-") {
-			t.Errorf("temporary file left behind: %s", e.Name())
-		}
-	}
+	assertNoTempFiles(t, path)
 }
 
 // write_through_thumbnails without fetch_remote has no writable store, so it

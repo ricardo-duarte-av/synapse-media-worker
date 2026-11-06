@@ -30,6 +30,13 @@ The worker reads Synapse's media store. It writes in exactly three places:
 | `last_access_ts` | Synapse's database, batched every minute | `database.update_last_access` |
 | Fetched remote media + its thumbnails | `remote_content/`, `remote_thumbnail/`, `remote_media_cache` | `media.fetch_remote`, `media.write_through_thumbnails` |
 
+Every write goes through a temp file from `MediaPaths.CreateTemp`, which puts it
+in the `.tmp/` of the destination's top-level directory (`local_content/.tmp/`,
+`remote_content/.tmp/`, ...) and renames it into place. The startup sweep lists
+only those directories. Do not create temp files beside their destination: the
+sweep would then have to walk every shard, which took most of an hour on a real
+store and filled the container's page cache.
+
 `paths.go` refuses any write outside `remote_content/` and `remote_thumbnail/`.
 `local_content`, `local_thumbnails` and `url_cache` are unwritable in code, so
 media the server owns cannot be damaged. Keep it that way unless deliberately
