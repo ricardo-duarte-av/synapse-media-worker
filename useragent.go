@@ -99,14 +99,14 @@ func withUserAgent(next http.RoundTripper, ua func() string) http.RoundTripper {
 // InstallUserAgent makes every request the federation client sends carry ua.
 // It must run before the client is used: it replaces transports.
 func InstallUserAgent(client *federation.Client, ua *UserAgent) {
-	// .well-known resolution. Left unset, mautrix uses http.DefaultClient,
-	// which sends Go's User-Agent and has no timeout. ExtHTTP's transport has
+	// .well-known resolution. It starts as the bare ExtHTTP, which would send
+	// Go's User-Agent. ExtHTTP's transport has
 	// the client's dial settings and IP filter, as Synapse's well-known agent
 	// has the federation IP blocklist.
-	if srt, ok := client.HTTP.Transport.(*federation.ServerResolvingTransport); ok {
+	if ft, ok := client.HTTP.Transport.(*FederationTransport); ok {
 		wellKnown := *client.ExtHTTP
 		wellKnown.Transport = withUserAgent(client.ExtHTTP.Transport, ua.External)
-		srt.ResolveOpts = &federation.ResolveServerNameOpts{HTTPClient: &wellKnown}
+		ft.WellKnownClient = &wellKnown
 	}
 	client.HTTP.Transport = withUserAgent(client.HTTP.Transport, ua.Federation)
 	client.ExtHTTP.Transport = withUserAgent(client.ExtHTTP.Transport, ua.External)

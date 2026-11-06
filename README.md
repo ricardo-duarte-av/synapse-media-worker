@@ -204,6 +204,31 @@ and orphans the old one.
 retention and `purge_media_cache` delete on that column, so a backdated value
 invites the media to be deleted almost immediately.
 
+### Resolving server names
+
+Outbound federation resolves server names as Synapse does (`resolver.go`),
+not as mautrix does. mautrix resolves the whole chain once and caches the
+outcome for 24 hours whatever happened: a `.well-known` server that was
+restarting, or a DNS lookup that timed out, quietly became `hostname:8448`, and
+every fetch from that origin went to the wrong place for a day.
+
+| Situation | Behaviour |
+|---|---|
+| Valid `.well-known` | cached for its `Cache-Control`/`Expires`, clamped to 5m–48h; 24h ±10% without either |
+| No usable `.well-known` (404, bad JSON, unreachable) | no delegation, cached 1h ±10% |
+| Same, but the domain had a valid one recently | retried 3 times, then no delegation for only 2m |
+| Unreachable or 5xx while a delegation is still cached | the cached delegation is kept |
+| SRV: NXDOMAIN or no records | `hostname:8448` |
+| SRV: any other DNS failure | the last answer, or the connection fails — never `:8448` |
+
+Every entry is refreshed from 80% of its TTL, so a short outage of a
+`.well-known` server is normally never seen. SRV is looked up per connection,
+as in Synapse, and every target is tried in order rather than only the first.
+
+One deviation: Go's resolver does not expose record TTLs, so SRV answers are
+not cached for their TTL; each new connection asks again. The last good answer
+is still kept for DNS failures, as Synapse keeps it.
+
 ### Outbound User-Agent
 
 Peers see the worker as part of a Synapse homeserver, so its requests carry

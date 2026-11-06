@@ -158,6 +158,12 @@ Libraries:
 - `federation.Client.DownloadMedia` in mautrix v0.30.1 returns `nil, nil, nil`
   on error, swallowing it. Use `MakeFullRequest` and parse the multipart
   directly.
+- mautrix's `ServerResolvingTransport` caches *any* resolution outcome for 24h,
+  and a failed `.well-known` or SRV lookup is not an error to it but
+  `hostname:8448`. Origins went unreachable for a day after a blip. The worker
+  replaces it with `FederationTransport` (`resolver.go`), which follows
+  Synapse's `well_known_resolver.py` and `srv_resolver.py`. Install it before
+  `InstallUserAgent`, which wraps whatever transport is in place.
 - `httputil.ReverseProxy` strips every `X-Forwarded-*` header when a `Rewrite`
   hook is set, and `ProxyRequest.SetXForwarded` *deletes* `X-Forwarded-For` when
   the peer is not `host:port` — which is every unix socket listener. Synapse

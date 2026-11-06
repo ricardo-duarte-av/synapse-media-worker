@@ -402,10 +402,12 @@ func newFederationAuth(cfg *Config, ua *UserAgent, log zerolog.Logger) (*federat
 	log.Info().Str("key_id", string(key.ID)).Int("keys_in_file", total).
 		Msg("Loaded signing key")
 
-	// InMemoryCache satisfies both the resolution cache and the key cache, so
-	// well-known lookups and signing keys are cached together.
+	// The cache holds signing keys. Server names are resolved by our own
+	// transport, not mautrix's, which caches a failed .well-known as
+	// "hostname:8448" for a day (see resolver.go).
 	cache := federation.NewInMemoryCache()
 	client := federation.NewClient(cfg.ServerName, key, cache, exhttp.SensibleClientSettings)
+	InstallFederationTransport(client, exhttp.SensibleClientSettings, log)
 	InstallUserAgent(client, ua)
 	auth := federation.NewServerAuth(client, cache,
 		func(federation.XMatrixAuth) string { return cfg.ServerName })

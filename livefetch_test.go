@@ -43,6 +43,7 @@ func TestLiveFetchMatchesSynapse(t *testing.T) {
 	}
 	cache := federation.NewInMemoryCache()
 	client := federation.NewClient(serverName, key, cache, exhttp.SensibleClientSettings)
+	InstallFederationTransport(client, exhttp.SensibleClientSettings, zerolog.Nop())
 	fetcher := NewFetcher(client, 100<<20, 60*time.Second, 2)
 	paths := NewMediaPaths(store)
 

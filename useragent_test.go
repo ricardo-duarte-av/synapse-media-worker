@@ -56,17 +56,12 @@ func newUATestClient(t *testing.T, rec *uaRecorder, ua *UserAgent) (*federation.
 	srv := httptest.NewTLSServer(rec)
 	t.Cleanup(srv.Close)
 
-	cache := federation.NewInMemoryCache()
-	cache.StoreResolution(&federation.ResolvedServerName{
-		ServerName: "test.example",
-		HostHeader: "test.example",
-		IPPort:     []string{srv.Listener.Addr().String()},
-		Expires:    time.Now().Add(time.Hour),
-	})
-	client := federation.NewClient("ours.example", nil, cache, exhttp.SensibleClientSettings)
+	client := federation.NewClient("ours.example", nil, federation.NewInMemoryCache(), exhttp.SensibleClientSettings)
 	client.AllowIP = nil // the test server is on loopback
+	ft := InstallFederationTransport(client, exhttp.SensibleClientSettings, zerolog.Nop())
+	ft.pin("test.example", srv.Listener.Addr().String())
 	insecure := &tls.Config{InsecureSkipVerify: true}
-	client.HTTP.Transport.(*federation.ServerResolvingTransport).Transport.TLSClientConfig = insecure
+	ft.Transport.TLSClientConfig = insecure
 	client.ExtHTTP.Transport.(*http.Transport).TLSClientConfig = insecure
 
 	InstallUserAgent(client, ua)
@@ -109,12 +104,12 @@ func TestFederationRequestsCarrySynapsesUserAgent(t *testing.T) {
 	}
 
 	// .well-known lookups go through the agent, which carries the suffix too.
-	srt := client.HTTP.Transport.(*userAgentTransport).next.(*federation.ServerResolvingTransport)
-	if srt.ResolveOpts == nil || srt.ResolveOpts.HTTPClient == nil {
-		t.Fatal(".well-known resolution still uses http.DefaultClient")
+	ft := client.HTTP.Transport.(*userAgentTransport).next.(*FederationTransport)
+	if ft.WellKnownClient == client.ExtHTTP {
+		t.Fatal(".well-known resolution does not carry the User-Agent")
 	}
 	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/.well-known/matrix/server", nil)
-	resp, err = srt.ResolveOpts.HTTPClient.Do(req)
+	resp, err = ft.WellKnownClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +169,7 @@ func TestConfiguredUserAgentIsNotRediscovered(t *testing.T) {
 func TestUnreachableHomeserverKeepsTheFallback(t *testing.T) {
 	ua := NewUserAgent("", "")
 	client := federation.NewClient("ours.example", nil, federation.NewInMemoryCache(), exhttp.SensibleClientSettings)
+	InstallFederationTransport(client, exhttp.SensibleClientSettings, zerolog.Nop())
 	InstallUserAgent(client, ua)
 
 	ctx, cancel := context.WithCancel(context.Background())
