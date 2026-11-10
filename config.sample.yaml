@@ -64,6 +64,14 @@ media:
   # number of usable CPUs; raise it only if generation is queueing while the
   # CPUs sit idle.
   # max_concurrent_thumbnails: 4
+  # Thumbnail AVIF and HEIC media. Synapse cannot, and answers 400 "Failed to
+  # generate thumbnail." for them; this is a deliberate deviation. The codecs
+  # run sandboxed as WebAssembly. Set false for strict parity with Synapse.
+  # thumbnail_avif_heic: true
+  # How many AVIF/HEIC thumbnails may be generated at once, within
+  # max_concurrent_thumbnails. A 12MP HEIC takes a few seconds and several
+  # hundred megabytes to decode, against about 50MB for a JPEG.
+  # max_concurrent_avif_heic: 2
   # How long to wait for an in-progress async upload before returning 504.
   default_timeout: 20s
   max_timeout: 60s

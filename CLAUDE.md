@@ -92,6 +92,12 @@ Thumbnails:
 - All resize arithmetic is integer floor division. Reproduce it exactly.
 - Synapse serves a thumbnail using the **database's** `thumbnail_length` as the
   Content-Length. A row that disagrees with the file truncates the response.
+- AVIF and HEIC are thumbnailed although Synapse answers 400 for them (a
+  listed deviation, `thumbnail_avif_heic`). Keep it in responses: those
+  thumbnails never go through to Synapse's store, get no upload-time
+  thumbnails, and a mislabelled AVIF under a Pillow type is still refused.
+  The decoders register with `image.Decode`, which is why
+  `synapseDecoderFormats` checks the sniffed format.
 
 Upload limits:
 
@@ -195,6 +201,6 @@ db.Close()` and the deletes silently do nothing.
 
 ```sh
 go test -race ./...
-go build -o synapse-media-worker .    # ./... will not write the binary
+go build -tags nodynamic -o synapse-media-worker .    # ./... will not write the binary
 ./synapse-media-worker -config config.yaml -check
 ```

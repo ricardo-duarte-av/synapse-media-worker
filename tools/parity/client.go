@@ -43,9 +43,10 @@ var clientThumbnailHeaders = []string{
 }
 
 type mediaRef struct {
-	origin  string // empty for local media
-	mediaID string
-	name    string
+	origin    string // empty for local media
+	mediaID   string
+	name      string
+	mediaType string
 }
 
 func (m mediaRef) server(defaultServer string) string {
@@ -140,6 +141,10 @@ func compareClientThumbnail(goClient *http.Client, goBase string, synClient *htt
 		return
 	}
 	if goResp.StatusCode != synResp.StatusCode {
+		if thumbnailDeviation(m.mediaType, goResp.StatusCode, synResp.StatusCode) {
+			r.deviation++
+			return
+		}
 		fmt.Printf("  %s thumb %s: status %d vs synapse %d\n", m, spec, goResp.StatusCode, synResp.StatusCode)
 		r.mismatch++
 		return
@@ -336,14 +341,24 @@ func sampleRemoteMedia(ctx context.Context, uri string, n int) ([]mediaRef, erro
 	}
 	defer pool.Close()
 
+	// A few AVIF/HEIC items are included so the deliberate thumbnail
+	// deviation is exercised rather than assumed.
 	const q = `
-SELECT media_origin, media_id
+(SELECT media_origin, media_id, media_type
   FROM remote_media_cache
  WHERE media_length IS NOT NULL
    AND quarantined_by IS NULL
    AND filesystem_id IS NOT NULL
- LIMIT $1`
-	rows, err := pool.Query(ctx, q, n)
+ LIMIT $1)
+UNION
+(SELECT media_origin, media_id, media_type
+  FROM remote_media_cache
+ WHERE media_length IS NOT NULL
+   AND quarantined_by IS NULL
+   AND filesystem_id IS NOT NULL
+   AND lower(split_part(media_type, ';', 1)) IN ('image/avif', 'image/heic', 'image/heif')
+ LIMIT $2)`
+	rows, err := pool.Query(ctx, q, n, max(n/5, 1))
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +366,7 @@ SELECT media_origin, media_id
 	var out []mediaRef
 	for rows.Next() {
 		var m mediaRef
-		if err := rows.Scan(&m.origin, &m.mediaID); err != nil {
+		if err := rows.Scan(&m.origin, &m.mediaID, &m.mediaType); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

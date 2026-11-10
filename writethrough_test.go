@@ -66,23 +66,30 @@ func TestWriteThroughGate(t *testing.T) {
 	}
 	rf := &RemoteFetcher{}
 
-	if !withFlag(true, rf).writeThroughRemote("example.com", "AbCdEfGh") {
+	if !withFlag(true, rf).writeThroughRemote("example.com", "AbCdEfGh", "image/png") {
 		t.Error("remote media with the flag on should be written through")
 	}
-	if withFlag(false, rf).writeThroughRemote("example.com", "AbCdEfGh") {
+	if withFlag(false, rf).writeThroughRemote("example.com", "AbCdEfGh", "image/png") {
 		t.Error("flag off should not write through")
 	}
 	// Local media has no origin.
-	if withFlag(true, rf).writeThroughRemote("", "AbCdEfGh") {
+	if withFlag(true, rf).writeThroughRemote("", "AbCdEfGh", "image/png") {
 		t.Error("local media must never be written through")
 	}
 	// No filesystem_id means we do not know where Synapse expects the file.
-	if withFlag(true, rf).writeThroughRemote("example.com", "") {
+	if withFlag(true, rf).writeThroughRemote("example.com", "", "image/png") {
 		t.Error("a missing filesystem_id must not be written through")
 	}
 	// Without a fetcher there is no writable store.
-	if withFlag(true, nil).writeThroughRemote("example.com", "AbCdEfGh") {
+	if withFlag(true, nil).writeThroughRemote("example.com", "AbCdEfGh", "image/png") {
 		t.Error("write-through requires the remote fetcher")
+	}
+	// Synapse never writes thumbnail rows for media it cannot thumbnail, so
+	// thumbnails the worker makes from AVIF or HEIC stay in its own cache.
+	for _, ct := range []string{"image/avif", "image/heic", "image/heif"} {
+		if withFlag(true, rf).writeThroughRemote("example.com", "AbCdEfGh", ct) {
+			t.Errorf("a thumbnail of %s must not be written into Synapse's store", ct)
+		}
 	}
 }
 

@@ -98,6 +98,14 @@ type MediaConfig struct {
 	// an unbounded burst of distinct sizes could exhaust both. Defaults to the
 	// number of usable CPUs.
 	MaxConcurrentThumbnails int `yaml:"max_concurrent_thumbnails"`
+	// ThumbnailAVIFHEIC thumbnails AVIF and HEIC sources, which Synapse
+	// cannot: it answers 400 for them. A deliberate deviation, on by default;
+	// turn it off for strict parity.
+	ThumbnailAVIFHEIC *bool `yaml:"thumbnail_avif_heic"`
+	// MaxConcurrentAVIFHEIC bounds how many of those are decoded at once,
+	// within MaxConcurrentThumbnails. Their decoders need several hundred
+	// megabytes for a phone photo. Defaults to 2.
+	MaxConcurrentAVIFHEIC int `yaml:"max_concurrent_avif_heic"`
 	// AcceptUploads lets the worker handle media uploads from local users.
 	// This is the only feature that writes into local_content, so it widens
 	// the write guard; off by default.
@@ -332,6 +340,12 @@ func (m MediaConfig) MaxUploadSizeOrDefault() int64 {
 		return *m.MaxUploadSize
 	}
 	return synapseDefaultMaxUploadSize
+}
+
+// AVIFHEICThumbnails reports whether AVIF and HEIC sources are thumbnailed,
+// defaulting to true.
+func (m MediaConfig) AVIFHEICThumbnails() bool {
+	return m.ThumbnailAVIFHEIC == nil || *m.ThumbnailAVIFHEIC
 }
 
 // ProxyFetchFailures reports whether a failed remote fetch should be handed to

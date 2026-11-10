@@ -11,8 +11,10 @@ ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
 
 # CGO is not needed: every image decoder and encoder used is pure Go, so the
-# result is a static binary that runs on any base.
-RUN CGO_ENABLED=0 go build -trimpath \
+# result is a static binary that runs on any base. The AVIF and HEIC codecs are
+# WebAssembly run in-process; nodynamic stops them preferring a system
+# libavif/libheif, which would run native code outside that sandbox.
+RUN CGO_ENABLED=0 go build -trimpath -tags nodynamic \
     -ldflags="-s -w \
       -X main.Version=${TAG} \
       -X main.Commit=${COMMIT} \

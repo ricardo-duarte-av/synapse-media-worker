@@ -147,6 +147,10 @@ Everything else is byte-for-byte identical, verified by the parity harness.
 
 - **Range requests are supported.** Synapse has no Range support at all. This is
   a superset, and it is where most of the performance win comes from.
+- **AVIF and HEIC are thumbnailed.** Synapse cannot decode either and answers
+  `400 "Failed to generate thumbnail."`, which leaves phone photos and modern
+  web images as blank tiles. See [Which media can be thumbnailed](#which-media-can-be-thumbnailed).
+  `media.thumbnail_avif_heic: false` restores Synapse's behaviour.
 - **Animated thumbnails are not generated.** `?animated=true` asks for WebP,
   which has no good pure-Go encoder, so those requests are proxied. On a real
   server they are well under 1% of stored thumbnails.
@@ -428,6 +432,7 @@ bounded:
 |---|---|---|
 | Database connections | `database.max_conns` (16) | Queries are short and indexed; this is rarely the limit |
 | Thumbnail generation | `media.max_concurrent_thumbnails` (CPU count) | CPU-bound, and holds the decoded bitmap in memory — hundreds of MB per image at a 100M pixel limit |
+| AVIF/HEIC thumbnails | `media.max_concurrent_avif_heic` (2), within the above | The WebAssembly decoders use 350–550 MB and 1–5 s for a 12MP photo, against about 50 MB and 0.35 s for a JPEG |
 | Proxied requests | none | Bounded by the upstream Synapse workers, not here |
 
 Concurrent requests for the *same* thumbnail are collapsed with `singleflight`,
@@ -497,21 +502,49 @@ It also warns about Synapse settings it cannot honour — `media_storage_provide
 
 ### Which media can be thumbnailed
 
-The worker decodes exactly what Synapse decodes, which is a much shorter list
-than the formats Matrix carries:
+The worker decodes what Synapse decodes, plus AVIF and HEIC:
 
-| Source | Thumbnail produced |
-|---|---|
-| `image/jpeg`, `image/jpg`, `image/webp` | `image/jpeg` |
-| `image/png`, `image/gif` | `image/png` |
-| everything else | none |
+| Source | Synapse | Worker |
+|---|---|---|
+| `image/jpeg`, `image/jpg`, `image/webp`, `image/png`, `image/gif` | yes | yes |
+| `image/avif`, `image/heic`, `image/heif` | no (400) | yes, unless `thumbnail_avif_heic: false` |
+| everything else | no (400) | no (400) |
 
-That is `THUMBNAIL_SUPPORTED_MEDIA_FORMAT_MAP` and `PILLOW_FORMATS` from
-Synapse, matched deliberately. **Video is never thumbnailed** — not by Synapse
-either — and neither are `image/svg+xml`, `image/avif`, `image/bmp`,
-`image/heic` or `image/x-icon`. A thumbnail request for any of them gets
-`400 M_UNKNOWN "Failed to generate thumbnail."`, which is what Synapse answers.
-Verified against real media of each type on a live server.
+The first row is `PILLOW_FORMATS` from Synapse, matched deliberately. A served
+thumbnail is always the type the request asks for (`image/png`), whatever the
+source. **Video is never thumbnailed**, by Synapse or the worker, and neither
+are `image/svg+xml`, `image/bmp` or `image/x-icon`. A thumbnail request for any
+of them gets `400 M_UNKNOWN "Failed to generate thumbnail."`, which is what
+Synapse answers. Verified against real media of each type on a live server.
+
+Upload-time thumbnails follow Synapse's `THUMBNAIL_SUPPORTED_MEDIA_FORMAT_MAP`
+only (`jpeg`/`webp` → `image/jpeg`, `png`/`gif` → `image/png`), so AVIF and
+HEIC get none at upload, as with Synapse.
+
+### AVIF and HEIC
+
+This is the one place the worker answers differently from Synapse on purpose,
+and it is kept to responses only:
+
+- **Nothing reaches Synapse's database.** Thumbnails of AVIF/HEIC media stay in
+  the worker's own cache, even for remote media with `write_through_thumbnails`
+  on, because Synapse never writes a thumbnail row for such media.
+- **The codecs are sandboxed.** libavif/dav1d and a Rust HEVC decoder run as
+  WebAssembly under wazero, so a hostile file can at worst fail inside the
+  sandbox. The binary stays pure Go with no cgo. Build with `-tags nodynamic`
+  (the Dockerfile does): without it the AVIF package prefers a system
+  `libavif` when one is installed, which runs native code in-process. The
+  worker warns at startup if that happened.
+- **Orientation comes from `irot`/`imir`**, which HEIF makes authoritative and
+  phones write for every portrait photo. EXIF orientation is not applied on
+  top.
+- **The pixel limit is checked from the header**, before decoding, as well as
+  after.
+- **Only the declared type selects these decoders.** An AVIF stored as
+  `image/png` is still refused, as Synapse refuses it. `image/heif` names the
+  container, so the `ftyp` brands pick AV1 or HEVC.
+- **They are slow and memory-hungry**, hence `max_concurrent_avif_heic`. The
+  first one after startup also pays about a second to compile the WebAssembly.
 
 Content-type parameters are stripped before the lookup, as Synapse does, so
 media stored as `image/png; charset=binary` is still thumbnailed rather than
@@ -677,8 +710,11 @@ docker compose logs media-worker | grep -o '"outcome":"[a-z_]*"' | sort | uniq -
 
 ```sh
 go test ./...              # unit tests, no server needed
-go build -o synapse-media-worker .
+go build -tags nodynamic -o synapse-media-worker .
 ```
+
+`-tags nodynamic` keeps the AVIF/HEIC decoders in their WebAssembly sandbox
+rather than using a system `libavif`/`libheif`.
 
 Note `go build ./...` will not write the binary once there is more than one main
 package in the module; use `-o` as above.

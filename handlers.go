@@ -409,7 +409,7 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 			return nil, err
 		}
 		thumbnailGenerateDuration.Observe(time.Since(start).Seconds())
-		s.storeGeneratedThumbnail(r.Context(), origin, mediaID, filesystemID, key, req, out)
+		s.storeGeneratedThumbnail(r.Context(), origin, mediaID, filesystemID, sourceType, key, req, out)
 		return out, nil
 	})
 	if err != nil {
@@ -441,11 +441,11 @@ func (s *Server) serveGeneratedThumbnail(w http.ResponseWriter, r *http.Request,
 // answered regardless.
 func (s *Server) storeGeneratedThumbnail(
 	ctx context.Context,
-	origin, mediaID, filesystemID, key string,
+	origin, mediaID, filesystemID, sourceType, key string,
 	req ThumbnailRequest,
 	data []byte,
 ) {
-	if s.writeThroughRemote(origin, filesystemID) {
+	if s.writeThroughRemote(origin, filesystemID, sourceType) {
 		if err := s.remote.WriteThroughRemoteThumbnail(ctx, origin, mediaID, filesystemID, req, data); err != nil {
 			thumbnailWriteThrough.WithLabelValues("failed").Inc()
 			s.log.Warn().Err(err).
@@ -465,9 +465,14 @@ func (s *Server) storeGeneratedThumbnail(
 
 // writeThroughRemote reports whether this thumbnail should be written into
 // Synapse's store. Local media is deliberately excluded: local_thumbnails/ is
-// not writable, so media this server owns cannot be touched.
-func (s *Server) writeThroughRemote(origin, filesystemID string) bool {
-	return s.cfg.Media.WriteThroughThumbnails &&
+// not writable, so media this server owns cannot be touched. So is any source
+// Synapse cannot thumbnail itself (AVIF, HEIC): Synapse never writes a
+// thumbnail row for such media, so neither does the worker, and the deviation
+// stays in responses rather than in Synapse's database.
+func (s *Server) writeThroughRemote(origin, filesystemID, sourceType string) bool {
+	_, synapseCan := synapseThumbnailType(sourceType)
+	return synapseCan &&
+		s.cfg.Media.WriteThroughThumbnails &&
 		s.remote != nil &&
 		origin != "" &&
 		filesystemID != ""

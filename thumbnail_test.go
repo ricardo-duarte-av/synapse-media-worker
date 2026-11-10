@@ -218,7 +218,7 @@ func TestCanGenerateStripsContentTypeParameters(t *testing.T) {
 	}
 	// Stripping must not make unsupported types look supported.
 	for _, ct := range []string{
-		"video/mp4", "image/svg+xml; charset=utf-8", "image/avif", "image/bmp",
+		"video/mp4", "image/svg+xml; charset=utf-8", "image/x-icon", "image/bmp",
 		"application/pdf", "",
 	} {
 		if th.CanGenerate(ct, req) {

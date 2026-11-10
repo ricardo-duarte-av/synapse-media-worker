@@ -134,6 +134,15 @@ func cropBox(srcW, srcH, w, h int) (scaledW, scaledH int, box image.Rectangle) {
 // It only ever reads from that store.
 type Thumbnailer struct {
 	maxImagePixels int64
+	// extraFormats enables AVIF and HEIC sources, which Synapse cannot
+	// thumbnail (see avifheic.go).
+	extraFormats bool
+	// extraSlots further bounds AVIF and HEIC generation. Their decoders run
+	// as WebAssembly and use several hundred megabytes for a 12MP photo,
+	// against about 50 for a JPEG of the same size, so a full set of slots
+	// generating them at once could exhaust memory. Taken before a general
+	// slot, so a queue of them never holds slots other formats need.
+	extraSlots chan struct{}
 	// slots bounds concurrent generation. Decoding holds the full bitmap in
 	// memory -- at the default 100M pixel limit that is hundreds of megabytes
 	// for a single image -- and resizing is CPU-bound, so letting every
@@ -147,6 +156,8 @@ func NewThumbnailer(maxImagePixels int64, maxConcurrent int) *Thumbnailer {
 	}
 	return &Thumbnailer{
 		maxImagePixels: maxImagePixels,
+		extraFormats:   true,
+		extraSlots:     make(chan struct{}, defaultMaxConcurrentAVIFHEIC),
 		slots:          make(chan struct{}, maxConcurrent),
 	}
 }
@@ -163,6 +174,41 @@ func (t *Thumbnailer) acquire(ctx context.Context) error {
 }
 
 func (t *Thumbnailer) release() { <-t.slots }
+
+// defaultMaxConcurrentAVIFHEIC is how many AVIF or HEIC sources are decoded at
+// once unless configured otherwise.
+const defaultMaxConcurrentAVIFHEIC = 2
+
+// SetMaxConcurrentAVIFHEIC sizes the AVIF/HEIC limit; n <= 0 keeps the
+// default. Call before serving.
+func (t *Thumbnailer) SetMaxConcurrentAVIFHEIC(n int) {
+	if n > 0 {
+		t.extraSlots = make(chan struct{}, n)
+	}
+}
+
+// acquireExtra waits for an AVIF/HEIC slot, as acquire does for a general one.
+func (t *Thumbnailer) acquireExtra(ctx context.Context) error {
+	select {
+	case t.extraSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// checkPixels refuses a source at or above the pixel limit. Synapse refuses at
+// the limit, not merely above it.
+func (t *Thumbnailer) checkPixels(w, h int) error {
+	if w <= 0 || h <= 0 {
+		return fmt.Errorf("%w: source has zero extent", ErrCannotGenerate)
+	}
+	if int64(w)*int64(h) >= t.maxImagePixels {
+		return fmt.Errorf("%w: source is %dx%d, at or above the %d pixel limit",
+			ErrCannotGenerate, w, h, t.maxImagePixels)
+	}
+	return nil
+}
 
 // baseMediaType strips any parameters and normalises case, the way Synapse's
 // _get_thumbnail_requirements does before looking a type up. Media stored with
@@ -181,10 +227,21 @@ var decodableSourceTypes = map[string]struct{}{
 	"image/webp": {}, "image/gif": {},
 }
 
+// synapseDecoderFormats are the image.Decode format names that correspond to
+// decodableSourceTypes. The AVIF and HEIC packages register themselves with
+// the image package too, so without this a mislabelled AVIF declared as
+// image/png would be thumbnailed here while Synapse refuses it.
+var synapseDecoderFormats = map[string]struct{}{
+	"jpeg": {}, "png": {}, "gif": {}, "webp": {},
+}
+
 // CanGenerate reports whether the worker is able to produce this thumbnail
 // itself. When false, the caller should proxy to Synapse.
 func (t *Thumbnailer) CanGenerate(sourceType string, req ThumbnailRequest) bool {
-	if _, ok := decodableSourceTypes[baseMediaType(sourceType)]; !ok {
+	base := baseMediaType(sourceType)
+	_, synapseCan := decodableSourceTypes[base]
+	extra := t.extraFormats && isExtraSourceType(base)
+	if !synapseCan && !extra {
 		return false
 	}
 	// Animated output needs a WebP encoder, which the standard library does not
@@ -200,6 +257,12 @@ func (t *Thumbnailer) CanGenerate(sourceType string, req ThumbnailRequest) bool 
 func (t *Thumbnailer) Generate(ctx context.Context, srcPath string, sourceType string, req ThumbnailRequest) ([]byte, error) {
 	if !t.CanGenerate(sourceType, req) {
 		return nil, ErrCannotGenerate
+	}
+	if isExtraSourceType(baseMediaType(sourceType)) {
+		if err := t.acquireExtra(ctx); err != nil {
+			return nil, err
+		}
+		defer func() { <-t.extraSlots }()
 	}
 	if err := t.acquire(ctx); err != nil {
 		return nil, err
@@ -217,24 +280,15 @@ func (t *Thumbnailer) Generate(ctx context.Context, srcPath string, sourceType s
 		raw = frame
 	}
 
-	img, _, err := image.Decode(bytes.NewReader(raw))
+	img, err := t.decodeSource(raw, baseMediaType(sourceType))
 	if err != nil {
-		// A file that will not decode is not an error worth retrying; Synapse
-		// treats it the same way and gives up on thumbnailing.
-		return nil, fmt.Errorf("%w: decoding source: %v", ErrCannotGenerate, err)
+		return nil, err
 	}
-
-	img = applyOrientation(img, readJPEGOrientation(raw))
-
 	bounds := img.Bounds()
 	srcW, srcH := bounds.Dx(), bounds.Dy()
-	if srcW <= 0 || srcH <= 0 {
-		return nil, fmt.Errorf("%w: source has zero extent", ErrCannotGenerate)
-	}
-	// Synapse refuses at or above the limit, not merely above it.
-	if int64(srcW)*int64(srcH) >= t.maxImagePixels {
-		return nil, fmt.Errorf("%w: source is %dx%d, at or above the %d pixel limit",
-			ErrCannotGenerate, srcW, srcH, t.maxImagePixels)
+	// Checked again after decoding: a header can understate the image.
+	if err := t.checkPixels(srcW, srcH); err != nil {
+		return nil, err
 	}
 
 	var out image.Image
@@ -253,6 +307,32 @@ func (t *Thumbnailer) Generate(ctx context.Context, srcPath string, sourceType s
 	}
 
 	return encodeImage(out, req.Type)
+}
+
+// decodeSource decodes the original, refusing it from its header alone when it
+// is over the pixel limit so an oversized image is never held in memory.
+func (t *Thumbnailer) decodeSource(raw []byte, baseType string) (image.Image, error) {
+	if isExtraSourceType(baseType) {
+		return t.decodeExtra(raw)
+	}
+
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		// A file that will not decode is not an error worth retrying; Synapse
+		// treats it the same way and gives up on thumbnailing.
+		return nil, fmt.Errorf("%w: decoding source: %v", ErrCannotGenerate, err)
+	}
+	if _, ok := synapseDecoderFormats[format]; !ok {
+		return nil, fmt.Errorf("%w: %s declared as %s", ErrCannotGenerate, format, baseType)
+	}
+	if err := t.checkPixels(cfg.Width, cfg.Height); err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%w: decoding source: %v", ErrCannotGenerate, err)
+	}
+	return applyOrientation(img, readJPEGOrientation(raw)), nil
 }
 
 // encodeImage writes the thumbnail in the requested format at Synapse's

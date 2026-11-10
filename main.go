@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gen2brain/avif"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/exhttp"
@@ -104,6 +105,13 @@ func run(cfg *Config, log zerolog.Logger, checkOnly bool) error {
 		thumbnailer: NewThumbnailer(cfg.Media.MaxImagePixelsOrDefault(), cfg.Media.MaxConcurrentThumbnails),
 		auth:        auth,
 		log:         log,
+	}
+
+	srv.thumbnailer.extraFormats = cfg.Media.AVIFHEICThumbnails()
+	srv.thumbnailer.SetMaxConcurrentAVIFHEIC(cfg.Media.MaxConcurrentAVIFHEIC)
+	if srv.thumbnailer.extraFormats && avif.Dynamic() == nil {
+		log.Warn().Msg("A system libavif was loaded, so AVIF thumbnails are decoded " +
+			"by native code instead of the WebAssembly sandbox; build with -tags nodynamic")
 	}
 
 	if cfg.Upstream.Download.configured() {

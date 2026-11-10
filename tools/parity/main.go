@@ -60,6 +60,20 @@ type result struct {
 	checked  int
 	mismatch int
 	skipped  int
+	// deviation counts differences README.md lists as deliberate.
+	deviation int
+}
+
+// thumbnailDeviation reports the one deliberate thumbnail difference: the
+// worker thumbnails AVIF and HEIC (thumbnail_avif_heic), where Synapse answers
+// 400. Anything else that differs is still a mismatch.
+func thumbnailDeviation(mediaType string, goStatus, synStatus int) bool {
+	base, _, _ := strings.Cut(mediaType, ";")
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "image/avif", "image/heic", "image/heif":
+		return goStatus == http.StatusOK && synStatus == http.StatusBadRequest
+	}
+	return false
 }
 
 func main() {
@@ -89,13 +103,9 @@ func main() {
 	}
 
 	ctx := context.Background()
-	localIDs, err := sampleMediaIDs(ctx, *dbURI, *sampleSize)
+	local, err := sampleLocalMedia(ctx, *dbURI, *sampleSize)
 	if err != nil {
 		fatal("sampling local media: %v", err)
-	}
-	local := make([]mediaRef, 0, len(localIDs))
-	for _, id := range localIDs {
-		local = append(local, mediaRef{mediaID: id})
 	}
 
 	var remote []mediaRef
@@ -118,7 +128,7 @@ func main() {
 		for _, m := range local {
 			compareDownload(goClient, goBase, synClient, synBase, key, m.mediaID, &fedDown)
 			for _, spec := range strings.Split(*thumbnailSizes, ",") {
-				compareThumbnail(goClient, goBase, synClient, synBase, key, m.mediaID, spec, &fedThumb)
+				compareThumbnail(goClient, goBase, synClient, synBase, key, m, spec, &fedThumb)
 			}
 		}
 	}
@@ -140,8 +150,12 @@ func main() {
 		if r.checked == 0 && r.skipped == 0 {
 			return
 		}
-		fmt.Printf("%-22s %4d checked, %4d skipped, %d MISMATCHED\n",
+		fmt.Printf("%-22s %4d checked, %4d skipped, %d MISMATCHED",
 			label+":", r.checked, r.skipped, r.mismatch)
+		if r.deviation > 0 {
+			fmt.Printf(", %d deliberate deviations", r.deviation)
+		}
+		fmt.Println()
 	}
 	report("federation downloads", fedDown)
 	report("federation thumbnails", fedThumb)
@@ -206,7 +220,8 @@ func compareDownload(goClient *http.Client, goBase string, synClient *http.Clien
 // compareThumbnail requires the decoded dimensions and content type to match.
 // The bytes will not: Go's Lanczos implementation and Pillow's differ in the
 // low bits, which is expected and invisible.
-func compareThumbnail(goClient *http.Client, goBase string, synClient *http.Client, synBase string, key *federation.SigningKey, mediaID, spec string, r *result) {
+func compareThumbnail(goClient *http.Client, goBase string, synClient *http.Client, synBase string, key *federation.SigningKey, m mediaRef, spec string, r *result) {
+	mediaID := m.mediaID
 	var w, h int
 	var method string
 	if _, err := fmt.Sscanf(spec, "%dx%d:%s", &w, &h, &method); err != nil {
@@ -222,6 +237,10 @@ func compareThumbnail(goClient *http.Client, goBase string, synClient *http.Clie
 		return
 	}
 	if goStatus != synStatus {
+		if thumbnailDeviation(m.mediaType, goStatus, synStatus) {
+			r.deviation++
+			return
+		}
 		fmt.Printf("  %s thumb %s: status %d vs synapse %d\n", mediaID, spec, goStatus, synStatus)
 		r.mismatch++
 		return
@@ -339,9 +358,11 @@ func loadFirstKey(path string) (*federation.SigningKey, error) {
 	return nil, fmt.Errorf("no keys in %s", path)
 }
 
-// sampleMediaIDs picks a spread of media, biased towards the shapes most
-// likely to expose a difference: unusual content types and awkward names.
-func sampleMediaIDs(ctx context.Context, uri string, n int) ([]string, error) {
+// sampleLocalMedia picks a spread of media, biased towards the shapes most
+// likely to expose a difference: unusual content types and awkward names. A
+// few AVIF/HEIC items are included so the deliberate deviation is exercised
+// rather than assumed.
+func sampleLocalMedia(ctx context.Context, uri string, n int) ([]mediaRef, error) {
 	pool, err := openPool(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -349,32 +370,37 @@ func sampleMediaIDs(ctx context.Context, uri string, n int) ([]string, error) {
 	defer pool.Close()
 
 	const q = `
-(SELECT media_id FROM local_media_repository
+(SELECT media_id, media_type FROM local_media_repository
   WHERE media_length IS NOT NULL AND quarantined_by IS NULL
     AND media_type LIKE 'image/%' LIMIT $1)
 UNION
-(SELECT media_id FROM local_media_repository
+(SELECT media_id, media_type FROM local_media_repository
   WHERE media_length IS NOT NULL AND quarantined_by IS NULL
     AND media_type NOT LIKE 'image/%' LIMIT $2)
 UNION
-(SELECT media_id FROM local_media_repository
+(SELECT media_id, media_type FROM local_media_repository
   WHERE media_length IS NOT NULL AND quarantined_by IS NULL
-    AND upload_name ~ '[^a-zA-Z0-9._-]' LIMIT $2)`
+    AND upload_name ~ '[^a-zA-Z0-9._-]' LIMIT $2)
+UNION
+(SELECT media_id, media_type FROM local_media_repository
+  WHERE media_length IS NOT NULL AND quarantined_by IS NULL
+    AND lower(split_part(media_type, ';', 1)) IN ('image/avif', 'image/heic', 'image/heif')
+  LIMIT $3)`
 
-	rows, err := pool.Query(ctx, q, n/2, n/4)
+	rows, err := pool.Query(ctx, q, n/2, n/4, max(n/10, 1))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	var out []mediaRef
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var m mediaRef
+		if err := rows.Scan(&m.mediaID, &m.mediaType); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		out = append(out, m)
 	}
-	return ids, rows.Err()
+	return out, rows.Err()
 }
 
 func openPool(ctx context.Context, uri string) (*pgxpool.Pool, error) {
